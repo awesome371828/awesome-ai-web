@@ -14,6 +14,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image, ImageEnhance, ImageFilter
 from bs4 import BeautifulSoup
+from dateutil.relativedelta import relativedelta
 import sqlite3
 import time
 
@@ -21,10 +22,10 @@ load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB для видео
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 
 # ============================================================
-# НАСТРОЙКА (ТВОИ КЛЮЧИ)
+# НАСТРОЙКА
 # ============================================================
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY") or "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
@@ -37,7 +38,7 @@ print(f"🔑 YANDEX_API_KEY: {YANDEX_API_KEY[:10]}...")
 print(f"📁 FOLDER_ID: {FOLDER_ID}")
 
 # ============================================================
-# БАЗА ДАННЫХ (SQLite для веба)
+# БАЗА ДАННЫХ
 # ============================================================
 def init_db():
     conn = sqlite3.connect('web_users.db')
@@ -107,10 +108,9 @@ SUPER_SYSTEM_PROMPT = """Ты — AWESOME AI. Мультимодальная н�
 «Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
 
 # ============================================================
-# ВСЕ ФУНКЦИИ ИЗ БОТА
+# ВСЕ ФУНКЦИИ
 # ============================================================
 
-# Время
 MOSCOW_TZ = timezone(timedelta(hours=3))
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
@@ -124,7 +124,6 @@ def format_date(date_str):
     except:
         return date_str
 
-# Погода
 def get_coordinates(city):
     try:
         city_lower = city.lower().strip()
@@ -212,7 +211,6 @@ def extract_city_from_query(text):
             return city
     return None
 
-# Поиск
 def search_google(query):
     try:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=ru"
@@ -290,7 +288,6 @@ def search_internet(query):
         return "\n\n---\n\n".join(results)
     return None
 
-# Курсы валют
 def get_exchange_rates():
     try:
         url = "https://api.exchangerate-api.com/v4/latest/USD"
@@ -318,7 +315,6 @@ def get_crypto_rates():
     except:
         return None
 
-# Математика
 def solve_math(text):
     text_lower = text.lower().strip()
     equation_match = re.search(r'(\d+)x\s*\+\s*(\d+)\s*=\s*(\d+)', text_lower)
@@ -350,7 +346,6 @@ def solve_math(text):
         pass
     return None
 
-# Анализ настроения
 def analyze_mood(text):
     mood_keywords = {
         'happy': ['рад', 'счастлив', 'отлично', 'хорошо', 'круто', 'супер', 'класс', 'ого', 'вау'],
@@ -366,7 +361,6 @@ def analyze_mood(text):
             return mood
     return 'neutral'
 
-# Анализ изображения
 def analyze_image(file_content):
     try:
         img = Image.open(io.BytesIO(file_content))
@@ -407,7 +401,6 @@ def analyze_image(file_content):
     except:
         return "⚠️ Не удалось проанализировать."
 
-# Генерация AI ответа
 def generate_ai_response(user_id, user_text, search_result=None, image_description=None):
     try:
         mood = analyze_mood(user_text)
@@ -454,9 +447,6 @@ def get_fallback_response(user_text, search_result=None, image_description=None)
     ]
     return random.choice(phrases)
 
-# ============================================================
-# ГЛАВНАЯ ОБРАБОТКА
-# ============================================================
 def process_message(user_id, user_text, image_description=None):
     if image_description:
         return generate_ai_response(user_id, user_text, None, image_description)
@@ -501,7 +491,7 @@ def process_message(user_id, user_text, image_description=None):
     return generate_ai_response(user_id, user_text, search_result, None)
 
 # ============================================================
-# HTML ИНТЕРФЕЙС С КНОПКАМИ И ФУНКЦИЯМИ
+# HTML ИНТЕРФЕЙС — МЕГА-КРАСИВЫЙ!
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -511,73 +501,464 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AWESOME AI</title>
     <style>
+        /* ========== ГЛОБАЛЬНЫЕ СТИЛИ ========== */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; height: 100vh; display: flex; flex-direction: column; }
-        .header { background: #161b22; padding: 12px 20px; border-bottom: 1px solid #30363d; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; flex-wrap: wrap; gap: 8px; }
-        .header h1 { font-size: 18px; font-weight: 700; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .header .badge { background: #238636; color: white; font-size: 10px; padding: 2px 10px; border-radius: 12px; -webkit-text-fill-color: white; }
-        .menu-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
-        .menu-buttons button { background: #21262d; border: 1px solid #30363d; color: #e6edf3; padding: 4px 12px; border-radius: 16px; font-size: 12px; cursor: pointer; transition: 0.2s; }
-        .menu-buttons button:hover { background: #30363d; border-color: #58a6ff; }
-        .chat { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
-        .message { max-width: 85%; padding: 8px 14px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 14px; }
-        .user { align-self: flex-end; background: #1f6feb; color: white; }
-        .bot { align-self: flex-start; background: #21262d; border: 1px solid #30363d; }
-        .input-area { padding: 10px 16px; border-top: 1px solid #30363d; display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; background: #0d1117; }
-        .input-row { display: flex; gap: 8px; }
-        .input-row input { flex: 1; padding: 8px 14px; border-radius: 20px; border: 1px solid #30363d; background: #161b22; color: #e6edf3; font-size: 14px; outline: none; }
-        .input-row input:focus { border-color: #58a6ff; }
-        .input-row button { padding: 8px 18px; border-radius: 20px; border: none; background: #1f6feb; color: white; font-weight: 600; font-size: 14px; cursor: pointer; transition: 0.2s; }
-        .input-row button:hover { background: #388bfd; }
-        .input-row button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .tools-row { display: flex; gap: 6px; flex-wrap: wrap; }
-        .tools-row button, .tools-row label { background: #21262d; border: 1px solid #30363d; color: #e6edf3; padding: 4px 12px; border-radius: 16px; font-size: 12px; cursor: pointer; transition: 0.2s; }
-        .tools-row button:hover, .tools-row label:hover { background: #30363d; border-color: #58a6ff; }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0e17;
+            color: #e6edf3;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        /* ========== АНИМИРОВАННЫЙ ФОН С ЧАСТИЦАМИ ========== */
+        #particles-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        
+        /* ========== НЕОНОВОЕ СВЕЧЕНИЕ ========== */
+        .glow {
+            position: fixed;
+            border-radius: 50%;
+            filter: blur(80px);
+            opacity: 0.3;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .glow-1 { width: 400px; height: 400px; top: -100px; right: -100px; background: #6c3ce0; animation: floatGlow 15s ease-in-out infinite; }
+        .glow-2 { width: 300px; height: 300px; bottom: -50px; left: -50px; background: #f0883e; animation: floatGlow 20s ease-in-out infinite reverse; }
+        .glow-3 { width: 200px; height: 200px; top: 50%; left: 50%; background: #1f6feb; animation: floatGlow 18s ease-in-out infinite 2s; }
+        
+        @keyframes floatGlow {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(50px, -50px) scale(1.2); }
+            66% { transform: translate(-30px, 40px) scale(0.9); }
+        }
+        
+        /* ========== ШАПКА ========== */
+        .header {
+            position: relative;
+            z-index: 1;
+            background: rgba(22, 27, 34, 0.85);
+            backdrop-filter: blur(20px) saturate(1.8);
+            padding: 14px 24px;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo {
+            font-size: 22px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: gradientShift 4s ease-in-out infinite;
+        }
+        @keyframes gradientShift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        .badge {
+            background: linear-gradient(135deg, #238636, #2ea043);
+            color: white;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 3px 12px;
+            border-radius: 20px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            -webkit-text-fill-color: white;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(0.95); }
+        }
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #2ea043;
+            animation: pulse 1.5s ease-in-out infinite;
+            margin-right: 4px;
+        }
+        
+        .menu-buttons {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .menu-buttons button {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: #b0b8c4;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+        .menu-buttons button:hover {
+            background: rgba(88, 166, 255, 0.15);
+            border-color: rgba(88, 166, 255, 0.3);
+            color: #58a6ff;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.15);
+        }
+        .menu-buttons button.premium-btn:hover {
+            background: rgba(240, 136, 62, 0.15);
+            border-color: rgba(240, 136, 62, 0.3);
+            color: #f0883e;
+            box-shadow: 0 4px 20px rgba(240, 136, 62, 0.15);
+        }
+        .menu-buttons button.danger-btn:hover {
+            background: rgba(248, 81, 73, 0.15);
+            border-color: rgba(248, 81, 73, 0.3);
+            color: #f85149;
+        }
+        
+        /* ========== ЧАТ ========== */
+        .chat {
+            position: relative;
+            z-index: 1;
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            scroll-behavior: smooth;
+        }
+        .chat::-webkit-scrollbar { width: 4px; }
+        .chat::-webkit-scrollbar-track { background: transparent; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 10px; }
+        
+        /* ========== СООБЩЕНИЯ ========== */
+        .message {
+            max-width: 80%;
+            padding: 10px 18px;
+            border-radius: 16px;
+            line-height: 1.6;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            font-size: 14px;
+            animation: messageSlide 0.3s ease-out;
+            position: relative;
+        }
+        @keyframes messageSlide {
+            0% { opacity: 0; transform: translateY(8px) scale(0.98); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+        .bot {
+            align-self: flex-start;
+            background: rgba(33, 38, 45, 0.9);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-bottom-left-radius: 4px;
+        }
+        .bot a { color: #58a6ff; }
+        .bot strong, .bot b { color: #f0883e; }
+        .message .file-preview {
+            max-width: 250px;
+            max-height: 200px;
+            border-radius: 10px;
+            margin-bottom: 6px;
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        
+        /* ========== ВВОД ========== */
+        .input-area {
+            position: relative;
+            z-index: 1;
+            padding: 12px 20px 16px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            background: rgba(10, 14, 23, 0.9);
+            backdrop-filter: blur(20px);
+            flex-shrink: 0;
+        }
+        .tools-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+        .tools-row button, .tools-row label {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: #8b949e;
+            padding: 4px 14px;
+            border-radius: 16px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+        .tools-row button:hover, .tools-row label:hover {
+            background: rgba(255,255,255,0.08);
+            border-color: rgba(255,255,255,0.12);
+            color: #e6edf3;
+        }
         .tools-row input[type="file"] { display: none; }
-        .typing { color: #8b949e; font-size: 13px; padding: 4px 16px; align-self: flex-start; }
-        .welcome { text-align: center; padding: 30px 20px; color: #8b949e; }
-        .welcome h2 { color: #e6edf3; margin-bottom: 6px; font-size: 20px; }
-        .welcome p { font-size: 13px; }
-        .file-preview { max-width: 200px; max-height: 150px; border-radius: 8px; margin: 4px 0; }
-        @media (max-width: 600px) { .header h1 { font-size: 15px; } .menu-buttons button { font-size: 10px; padding: 3px 8px; } .input-row input { font-size: 13px; } }
+        
+        .input-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .input-row input {
+            flex: 1;
+            padding: 10px 18px;
+            border-radius: 24px;
+            border: 1px solid rgba(255,255,255,0.08);
+            background: rgba(22, 27, 34, 0.8);
+            color: #e6edf3;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.3s ease;
+            font-family: inherit;
+        }
+        .input-row input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 30px rgba(88, 166, 255, 0.08);
+        }
+        .input-row input::placeholder { color: #484f58; }
+        .input-row button {
+            padding: 10px 28px;
+            border-radius: 24px;
+            border: none;
+            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: inherit;
+            white-space: nowrap;
+        }
+        .input-row button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 4px 30px rgba(88, 166, 255, 0.25);
+        }
+        .input-row button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        /* ========== ПЕЧАТАЕТ ========== */
+        .typing {
+            color: #8b949e;
+            font-size: 13px;
+            padding: 4px 16px;
+            align-self: flex-start;
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        /* ========== WELCOME ========== */
+        .welcome {
+            text-align: center;
+            padding: 40px 20px;
+            color: #8b949e;
+        }
+        .welcome h2 {
+            color: #e6edf3;
+            margin-bottom: 6px;
+            font-size: 24px;
+            font-weight: 800;
+        }
+        .welcome p { font-size: 14px; opacity: 0.7; }
+        .welcome .features {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+        .welcome .features span {
+            background: rgba(255,255,255,0.04);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        
+        /* ========== АДАПТИВ ========== */
+        @media (max-width: 640px) {
+            .header { padding: 10px 14px; }
+            .logo { font-size: 17px; }
+            .menu-buttons button { font-size: 10px; padding: 3px 10px; }
+            .message { max-width: 92%; font-size: 13px; padding: 8px 14px; }
+            .chat { padding: 12px 14px; }
+            .input-area { padding: 10px 14px; }
+            .input-row input { font-size: 13px; padding: 8px 14px; }
+            .input-row button { padding: 8px 18px; font-size: 13px; }
+            .tools-row button, .tools-row label { font-size: 10px; padding: 3px 10px; }
+            .welcome h2 { font-size: 18px; }
+            .welcome .features { gap: 8px; }
+            .welcome .features span { font-size: 10px; padding: 4px 10px; }
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div style="display:flex;align-items:center;gap:8px;">
-            <h1>🧠 AWESOME AI</h1>
-            <span class="badge">🔥 Нейросеть</span>
+    <!-- ===== АНИМИРОВАННЫЙ ФОН ===== -->
+    <canvas id="particles-canvas"></canvas>
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+    
+    <!-- ===== ШАПКА ===== -->
+    <header class="header">
+        <div class="header-left">
+            <span class="logo">🧠 AWESOME AI</span>
+            <span class="badge"><span class="status-dot"></span> В сети</span>
         </div>
         <div class="menu-buttons">
             <button onclick="sendCommand('/status')">📊 Статус</button>
-            <button onclick="sendCommand('/premium')">💎 Premium</button>
+            <button class="premium-btn" onclick="sendCommand('/premium')">💎 Premium</button>
             <button onclick="sendCommand('/test')">🎁 Тест</button>
             <button onclick="sendCommand('/profile')">👤 Профиль</button>
             <button onclick="sendCommand('/help')">❓ Помощь</button>
-            <button onclick="clearChat()">🧹 Очистить</button>
+            <button class="danger-btn" onclick="clearChat()">🧹 Очистить</button>
         </div>
-    </div>
+    </header>
+    
+    <!-- ===== ЧАТ ===== -->
     <div class="chat" id="chat">
         <div class="welcome">
             <h2>✨ AWESOME AI — лучшая нейросеть!</h2>
             <p>Спрашивай что угодно — я отвечу, решу, поищу в интернете.</p>
-            <p style="font-size:12px;color:#8b949e;margin-top:4px;">📸 Фото | 🎥 Видео | 🎤 Голос</p>
+            <div class="features">
+                <span>📸 Фото</span>
+                <span>🎥 Видео</span>
+                <span>🎤 Голос</span>
+                <span>🌐 Поиск</span>
+                <span>💵 Курсы</span>
+                <span>🧮 Математика</span>
+            </div>
         </div>
     </div>
+    
+    <!-- ===== ВВОД ===== -->
     <div class="input-area">
         <div class="tools-row">
             <label for="fileInput">📎 Прикрепить</label>
-            <input type="file" id="fileInput" accept="image/*,video/*,audio/*" multiple onchange="handleFiles(this.files)">
-            <button onclick="document.getElementById('fileInput').click()">📸 Фото</button>
+            <input type="file" id="fileInput" accept="image/*,video/*,audio/*,application/pdf" multiple onchange="handleFiles(this.files)">
+            <button onclick="document.getElementById('fileInput').click()">📸 Фото/Видео</button>
             <button onclick="startRecording()">🎤 Голос</button>
-            <button onclick="sendCommand('/draw ' + prompt('Что нарисовать?'))">🎨 Рисовать</button>
+            <button onclick="sendCommand('/draw ' + prompt('🎨 Что нарисовать?'))">🎨 Рисовать</button>
+            <button onclick="sendCommand('/weather ' + prompt('🌤 Город?'))">🌤 Погода</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши свой вопрос..." onkeydown="if(event.key==='Enter') send()">
-            <button id="sendBtn" onclick="send()">Отправить</button>
+            <input id="input" placeholder="Напиши свой вопрос..." onkeydown="if(event.key==='Enter') send()" autofocus>
+            <button id="sendBtn" onclick="send()">🚀 Отправить</button>
         </div>
     </div>
+    
     <script>
+        // ============================================================
+        // ЧАСТИЦЫ НА ФОНЕ
+        // ============================================================
+        (function() {
+            const canvas = document.getElementById('particles-canvas');
+            const ctx = canvas.getContext('2d');
+            let particles = [];
+            const count = 80;
+            
+            function resize() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+            
+            class Particle {
+                constructor() {
+                    this.x = Math.random() * canvas.width;
+                    this.y = Math.random() * canvas.height;
+                    this.size = Math.random() * 3 + 1;
+                    this.speedX = (Math.random() - 0.5) * 0.5;
+                    this.speedY = (Math.random() - 0.5) * 0.5;
+                    this.opacity = Math.random() * 0.5 + 0.2;
+                }
+                update() {
+                    this.x += this.speedX;
+                    this.y += this.speedY;
+                    if (this.x < 0 || this.x > canvas.width) this.speedX *= -1;
+                    if (this.y < 0 || this.y > canvas.height) this.speedY *= -1;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(136, 192, 255, ${this.opacity})`;
+                    ctx.fill();
+                }
+            }
+            
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle());
+            }
+            
+            function connectParticles() {
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 150) {
+                            ctx.beginPath();
+                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.08 * (1 - dist / 150)})`;
+                            ctx.lineWidth = 0.5;
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+            
+            function animate() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                particles.forEach(p => { p.update(); p.draw(); });
+                connectParticles();
+                requestAnimationFrame(animate);
+            }
+            animate();
+        })();
+        
+        // ============================================================
+        // ЛОГИКА ЧАТА
+        // ============================================================
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
@@ -585,6 +966,10 @@ HTML_TEMPLATE = """
         let userId = Date.now();
         
         function addMessage(text, isUser, filePreview = null) {
+            // Убираем welcome если есть
+            const welcome = chat.querySelector('.welcome');
+            if (welcome) welcome.remove();
+            
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
             if (filePreview) {
@@ -606,7 +991,7 @@ HTML_TEMPLATE = """
             if (show) {
                 const div = document.createElement('div');
                 div.className = 'typing';
-                div.textContent = 'AWESOME AI печатает';
+                div.textContent = '🧠 AWESOME AI печатает';
                 chat.appendChild(div);
                 chat.scrollTop = chat.scrollHeight;
             }
@@ -643,7 +1028,7 @@ HTML_TEMPLATE = """
                 }
             } catch (e) {
                 setTyping(false);
-                addMessage('⚠️ Ошибка соединения', false);
+                addMessage('⚠️ Ошибка соединения с сервером', false);
             }
             sendBtn.disabled = false;
             input.focus();
@@ -670,7 +1055,20 @@ HTML_TEMPLATE = """
         }
         
         function clearChat() {
-            chat.innerHTML = '<div class="welcome"><h2>✨ AWESOME AI — лучшая нейросеть!</h2><p>Спрашивай что угодно — я отвечу, решу, поищу в интернете.</p></div>';
+            chat.innerHTML = `
+                <div class="welcome">
+                    <h2>✨ AWESOME AI — лучшая нейросеть!</h2>
+                    <p>Спрашивай что угодно — я отвечу, решу, поищу в интернете.</p>
+                    <div class="features">
+                        <span>📸 Фото</span>
+                        <span>🎥 Видео</span>
+                        <span>🎤 Голос</span>
+                        <span>🌐 Поиск</span>
+                        <span>💵 Курсы</span>
+                        <span>🧮 Математика</span>
+                    </div>
+                </div>
+            `;
         }
         
         function startRecording() {
@@ -679,7 +1077,6 @@ HTML_TEMPLATE = """
                 return;
             }
             addMessage('🎤 Запись голоса... Говорите', true);
-            // Простой вариант - используем Web Speech API
             const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
             recognition.lang = 'ru-RU';
             recognition.onresult = function(event) {
@@ -694,7 +1091,7 @@ HTML_TEMPLATE = """
             recognition.start();
         }
         
-        // Авто-отправка Enter
+        // Enter для отправки
         document.addEventListener('DOMContentLoaded', function() {
             input.focus();
         });
@@ -771,7 +1168,7 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ВЕБ-ВЕРСИЯ (ПОЛНАЯ)")
+    print("🧠 AWESOME AI — ВЕБ-ВЕРСИЯ (МЕГА-КРАСИВАЯ)")
     print("=" * 60)
     print(f"🔑 API ключ: {'✅ НАЙДЕН' if YANDEX_API_KEY else '❌ НЕ НАЙДЕН'}")
     print(f"📁 Folder ID: {FOLDER_ID}")
