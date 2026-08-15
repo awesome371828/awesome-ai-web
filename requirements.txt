@@ -5,4 +5,4 @@ requests
 beautifulsoup4
 Pillow
 python-dateutil
-supabase
+psycopg2-binary
