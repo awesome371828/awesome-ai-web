@@ -14,7 +14,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image, ImageEnhance, ImageFilter
 from bs4 import BeautifulSoup
-from dateutil.relativedelta import relativedelta  # ✅ ПРАВИЛЬНО
+from dateutil.relativedelta import relativedelta  # ✅ ПРАВИЛЬНО!
 import sqlite3
 import time
 
