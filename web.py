@@ -10,7 +10,8 @@ from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
-import sqlite3
+import psycopg2
+import psycopg2.extras
 
 load_dotenv()
 
@@ -22,40 +23,82 @@ CORS(app)
 # ============================================================
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY") or "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
-OWNER_ID = 1786791896384
+OWNER_ID = 6652898792
 
 # ============================================================
-# БАЗА ДАННЫХ
+# ПОДКЛЮЧЕНИЕ К POSTGRESQL
 # ============================================================
+DB_HOST = "db-team-cms3ykjq18295m0i1tsv8ml5p"
+DB_NAME = "db_awesome_ai_web"
+DB_USER = "u_cms4kcr39"
+DB_PASSWORD = "3s4ZLCdPDORLDURK3y8AI8gH2PVz"
+DB_PORT = "5432"
+
+def get_db_connection():
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            port=DB_PORT
+        )
+        return conn
+    except Exception as e:
+        print(f"❌ Ошибка БД: {e}")
+        return None
+
 def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        premium INTEGER DEFAULT 0,
-        messages_today INTEGER DEFAULT 0,
-        is_admin INTEGER DEFAULT 0,
-        test_used INTEGER DEFAULT 0,
-        joined_at TEXT
-    )''')
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            premium INTEGER DEFAULT 0,
+            messages_today INTEGER DEFAULT 0,
+            is_admin INTEGER DEFAULT 0,
+            test_used INTEGER DEFAULT 0,
+            joined_at TEXT
+        )
+    ''')
     conn.commit()
+    cur.close()
     conn.close()
+    print("✅ PostgreSQL готов!")
 
 init_db()
 
 def ensure_user(user_id, username):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    if not c.fetchone():
-        c.execute('INSERT INTO users (user_id, username, messages_today, joined_at) VALUES (?, ?, ?, ?)',
-                  (user_id, username, 0, datetime.now().strftime('%d.%m.%Y %H:%M')))
+    conn = get_db_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
+    if not cur.fetchone():
+        cur.execute('INSERT INTO users (user_id, username, messages_today, joined_at) VALUES (%s, %s, %s, %s)',
+                    (user_id, username, 0, datetime.now().strftime('%d.%m.%Y %H:%M')))
         conn.commit()
+    cur.close()
     conn.close()
 
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    conn = get_db_connection()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    cur.execute('SELECT is_admin FROM users WHERE user_id = %s', (user_id,))
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    return result is not None and result[0] == 1
+
 # ============================================================
-# ВСЕ ФУНКЦИИ
+# ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ (ПОГОДА, ПОИСК, КУРСЫ, МАТЕМАТИКА)
 # ============================================================
 def get_weather(city):
     try:
@@ -191,10 +234,13 @@ def process_message(user_id, user_text):
     text_lower = user_text.lower().strip()
     
     if text_lower == '/status':
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = c.fetchone()
+        conn = get_db_connection()
+        if not conn:
+            return "❌ Ошибка БД"
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
+        user = cur.fetchone()
+        cur.close()
         conn.close()
         if not user:
             return "❌ Пользователь не найден"
@@ -207,25 +253,31 @@ def process_message(user_id, user_text):
         return "💎 *PREMIUM*\n✅ Приоритет\n✅ Качество\n✅ Эксклюзив\n\n📨 150/день\n💰 50₽/мес"
     
     if text_lower == '/test':
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT test_used, premium FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
+        conn = get_db_connection()
+        if not conn:
+            return "❌ Ошибка БД"
+        cur = conn.cursor()
+        cur.execute('SELECT test_used, premium FROM users WHERE user_id = %s', (user_id,))
+        result = cur.fetchone()
+        cur.close()
         if result and result[0] == 1:
+            conn.close()
             return "⛔ Тест уже использован!"
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET premium = 1, test_used = 1 WHERE user_id = ?', (user_id,))
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET premium = 1, test_used = 1 WHERE user_id = %s', (user_id,))
         conn.commit()
+        cur.close()
         conn.close()
         return "🎉 *ТЕСТ PREMIUM АКТИВИРОВАН!*\n✅ 24 часа\n✅ 150 сообщений"
     
     if text_lower == '/profile':
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = c.fetchone()
+        conn = get_db_connection()
+        if not conn:
+            return "❌ Ошибка БД"
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
+        user = cur.fetchone()
+        cur.close()
         conn.close()
         if not user:
             return "❌ Пользователь не найден"
@@ -292,7 +344,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML — С ПОСТОЯННЫМ USER_ID!
+# HTML ИНТЕРФЕЙС (КРАСИВЫЙ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -732,13 +784,11 @@ HTML_TEMPLATE = """
         const sendBtn = document.getElementById('sendBtn');
         
         // ===== ПОСТОЯННЫЙ USER_ID =====
-        // Пытаемся получить ID из localStorage, если нет — создаём и сохраняем
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
             userId = Date.now() + Math.floor(Math.random() * 1000);
             localStorage.setItem('awesome_user_id', userId);
         }
-        console.log('👤 Ваш постоянный ID:', userId);
         
         function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
@@ -872,10 +922,14 @@ def admin_panel():
         <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец (ID: 6652898792) может зайти в админ-панель.</p></div></body></html>
         """, 403
     
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at FROM users ORDER BY user_id DESC')
-    users = c.fetchall()
+    conn = get_db_connection()
+    if not conn:
+        return "<h1>❌ Ошибка БД</h1>", 500
+    
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at FROM users ORDER BY user_id DESC')
+    users = cur.fetchall()
+    cur.close()
     conn.close()
     
     rows = ""
@@ -926,7 +980,7 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ПОСТОЯННЫЙ ID")
+    print("🧠 AWESOME AI — POSTGRESQL ВЕРСИЯ")
     print("=" * 60)
     print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"🌐 http://localhost:{port}")
