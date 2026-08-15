@@ -34,11 +34,19 @@ FREE_LIMIT = 20
 PREMIUM_LIMIT = 150
 
 # ============================================================
-# БАЗА ДАННЫХ
+# ПОДКЛЮЧАЕМ ТУ ЖЕ БАЗУ, ЧТО И В bot.py
 # ============================================================
+DB_PATH = 'users.db'  # ТА ЖЕ БАЗА, ЧТО И У ТЕЛЕГРАМ-БОТА!
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def init_db():
-    conn = sqlite3.connect('web_users.db')
+    conn = get_db()
     c = conn.cursor()
+    # Таблица users (как в bot.py)
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -49,22 +57,23 @@ def init_db():
         is_admin INTEGER DEFAULT 0,
         test_used INTEGER DEFAULT 0,
         joined_at TEXT,
+        is_owner INTEGER DEFAULT 0
+    )''')
+    # Таблица total_stats (как в bot.py)
+    c.execute('''CREATE TABLE IF NOT EXISTS total_stats (
+        user_id INTEGER PRIMARY KEY,
         total_messages INTEGER DEFAULT 0
     )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        role TEXT,
-        text TEXT,
-        timestamp TEXT
-    )''')
+    # Таблица premium_orders (как в bot.py)
     c.execute('''CREATE TABLE IF NOT EXISTS premium_orders (
         order_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         status TEXT DEFAULT 'pending',
         created_at TEXT
     )''')
+    # Таблица banned (как в bot.py)
     c.execute('''CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)''')
+    # Таблица muted (как в bot.py)
     c.execute('''CREATE TABLE IF NOT EXISTS muted (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
@@ -72,12 +81,136 @@ def init_db():
 init_db()
 
 # ============================================================
-# ВРЕМЯ
+# ФУНКЦИИ РАБОТЫ С БД (ТАКИЕ ЖЕ, КАК В bot.py)
 # ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
+def get_db_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return dict(result) if result else None
 
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
+def ensure_user(user_id, username):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    if not c.fetchone():
+        is_owner = 1 if user_id == OWNER_ID else 0
+        joined_at = datetime.now().strftime('%d.%m.%Y %H:%M')
+        c.execute('''INSERT INTO users 
+                     (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, is_owner) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user_id, username, 0, datetime.now().strftime('%Y-%m-%d'), is_owner, 0, joined_at, is_owner))
+        c.execute('INSERT OR IGNORE INTO total_stats (user_id, total_messages) VALUES (?, 0)', (user_id,))
+        conn.commit()
+    conn.close()
+
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None and result[0] == 1
+
+def is_banned(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM banned WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+def is_muted(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT 1 FROM muted WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+def ban_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unban_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM banned WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def mute_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO muted (user_id) VALUES (?)', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unmute_user(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('DELETE FROM muted WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def set_premium(user_id, duration_str):
+    now = datetime.now()
+    if duration_str.endswith('d'):
+        delta = timedelta(days=int(duration_str[:-1]))
+    elif duration_str.endswith('m'):
+        delta = timedelta(minutes=int(duration_str[:-1]))
+    elif duration_str.endswith('h'):
+        delta = timedelta(hours=int(duration_str[:-1]))
+    elif duration_str.endswith('mes'):
+        delta = timedelta(days=int(duration_str[:-3]) * 30)
+    elif duration_str.endswith('y'):
+        delta = timedelta(days=int(duration_str[:-1]) * 365)
+    else:
+        return False
+    
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    current_expires = result[0] if result else None
+    
+    if current_expires:
+        try:
+            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+            if current_date > now:
+                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    
+    c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def remove_premium(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE users SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def set_admin(user_id, status):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_admin = ? WHERE user_id = ?', (1 if status else 0, user_id))
+    conn.commit()
+    conn.close()
 
 def format_date(date_str):
     if not date_str:
@@ -88,41 +221,35 @@ def format_date(date_str):
     except:
         return date_str
 
-# ============================================================
-# ФУНКЦИИ БД
-# ============================================================
-def get_db_user(user_id):
-    conn = sqlite3.connect('web_users.db')
+def get_premium_status(user_id):
+    conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT premium, premium_expires FROM users WHERE user_id = ?', (user_id,))
     result = c.fetchone()
     conn.close()
     if result:
-        columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'total_messages']
-        return dict(zip(columns, result))
-    return None
-
-def ensure_user(user_id, username):
-    conn = sqlite3.connect('web_users.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    if not c.fetchone():
-        is_owner = 1 if user_id == OWNER_ID else 0
-        c.execute('INSERT INTO users (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, total_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                  (user_id, username, 0, datetime.now().strftime('%Y-%m-%d'), is_owner, 0, datetime.now().strftime('%d.%m.%Y %H:%M'), 0))
-        conn.commit()
-    conn.close()
-
-def is_banned(user_id):
-    conn = sqlite3.connect('web_users.db')
-    c = conn.cursor()
-    c.execute('SELECT 1 FROM banned WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
+        premium, expires = result
+        if premium == 1 and expires:
+            try:
+                expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+                if datetime.now() > expires_date:
+                    remove_premium(user_id)
+                    return False
+            except:
+                return premium == 1
+        return premium == 1
+    return False
 
 # ============================================================
-# ОСНОВНЫЕ ФУНКЦИИ
+# ВРЕМЯ
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+# ============================================================
+# ОСТАЛЬНЫЕ ФУНКЦИИ (погода, поиск, курсы, математика, анализ)
 # ============================================================
 def get_weather(city):
     try:
@@ -388,7 +515,7 @@ def process_message(user_id, user_text, image_description=None):
             return "❌ Пользователь не найден"
         premium = user_data.get('premium', 0) == 1
         messages = user_data.get('messages_today', 0)
-        total = user_data.get('total_messages', 0)
+        total = get_total_messages(user_id)
         expires = user_data.get('premium_expires')
         if premium:
             status = f"💎 PREMIUM (до {format_date(expires)})" if expires else "💎 PREMIUM"
@@ -399,29 +526,33 @@ def process_message(user_id, user_text, image_description=None):
         return f"📊 *ТВОЙ СТАТУС*\n\n👤 Статус: {status}\n📨 Осталось: {limit}\n📊 Всего: {total}"
     
     if text_lower == '/premium':
+        has_premium = get_premium_status(user_id)
+        if has_premium:
+            return "💎 У тебя уже есть Premium!"
         return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges"
     
     if text_lower == '/test':
         user_data = get_db_user(user_id)
         if user_data and user_data.get('test_used', 0) == 1:
             return "⛔ Ты уже использовал тест Premium!"
-        if user_data and user_data.get('premium', 0) == 1:
+        if get_premium_status(user_id):
             return "💎 У тебя уже есть Premium!"
-        conn = sqlite3.connect('web_users.db')
-        c = conn.cursor()
-        expires = (get_moscow_time() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
-        c.execute('UPDATE users SET premium = 1, premium_expires = ?, test_used = 1 WHERE user_id = ?', (expires, user_id))
-        conn.commit()
-        conn.close()
-        return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
+        if set_premium(user_id, "1d"):
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('UPDATE users SET test_used = 1 WHERE user_id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+            return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
+        return "❌ Ошибка активации Premium"
     
     if text_lower == '/profile':
         user_data = get_db_user(user_id)
         if not user_data:
             return "❌ Пользователь не найден"
-        premium = user_data.get('premium', 0) == 1
+        premium = get_premium_status(user_id)
         messages = user_data.get('messages_today', 0)
-        total = user_data.get('total_messages', 0)
+        total = get_total_messages(user_id)
         joined = user_data.get('joined_at', 'Неизвестно')
         if user_id == OWNER_ID:
             status = "👑 ВЛАДЕЛЕЦ"
@@ -449,12 +580,7 @@ def process_message(user_id, user_text, image_description=None):
 💎 Premium: 150 сообщений/день"""
     
     if text_lower == '/clear':
-        conn = sqlite3.connect('web_users.db')
-        c = conn.cursor()
-        c.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        return "🧹 История диалога очищена!"
+        return "🧹 История очищена!"
     
     if text_lower.startswith('/draw '):
         prompt = user_text[6:].strip()
@@ -511,6 +637,14 @@ def process_message(user_id, user_text, image_description=None):
     
     return generate_ai_response(user_id, user_text, search_result, None)
 
+def get_total_messages(user_id):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT total_messages FROM total_stats WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else 0
+
 def extract_city_from_query(text):
     text_lower = text.lower()
     cities = ["москва", "санкт-петербург", "ростов-на-дону", "новосибирск", "екатеринбург", "казань", "краснодар", "сочи", "владивосток"]
@@ -527,7 +661,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML ИНТЕРФЕЙС (КРАСИВЫЙ)
+# ГЛАВНАЯ СТРАНИЦА (КРАСИВЫЙ ЧАТ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -767,7 +901,7 @@ HTML_TEMPLATE = """
 """
 
 # ============================================================
-# АДМИН-ПАНЕЛЬ
+# АДМИН-ПАНЕЛЬ (ПОЛНОСТЬЮ РАБОЧАЯ)
 # ============================================================
 @app.route('/admin')
 def admin_panel():
@@ -775,49 +909,67 @@ def admin_panel():
     if not user_id or user_id != OWNER_ID:
         return "<h1 style='color:#f85149;'>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец</p>", 403
     
-    conn = sqlite3.connect('web_users.db')
+    conn = get_db()
     c = conn.cursor()
     action = request.args.get('action')
     target_id = request.args.get('target_id', type=int)
     
+    # Выдать Premium (1 месяц)
     if action == 'giveprem' and target_id:
-        expires = (get_moscow_time() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+        expires = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
         c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, target_id))
         conn.commit()
+    # Забрать Premium
     if action == 'delprem' and target_id:
         c.execute('UPDATE users SET premium = 0, premium_expires = NULL WHERE user_id = ?', (target_id,))
         conn.commit()
+    # Выдать админа
     if action == 'giveadmin' and target_id:
         c.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (target_id,))
         conn.commit()
+    # Забрать админа
     if action == 'deladmin' and target_id:
         c.execute('UPDATE users SET is_admin = 0 WHERE user_id = ?', (target_id,))
         conn.commit()
+    # Забанить
     if action == 'ban' and target_id:
         c.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (target_id,))
         conn.commit()
+    # Разбанить
     if action == 'unban' and target_id:
         c.execute('DELETE FROM banned WHERE user_id = ?', (target_id,))
         conn.commit()
+    # Замутить
     if action == 'mute' and target_id:
         c.execute('INSERT OR IGNORE INTO muted (user_id) VALUES (?)', (target_id,))
         conn.commit()
+    # Размутить
     if action == 'unmute' and target_id:
         c.execute('DELETE FROM muted WHERE user_id = ?', (target_id,))
         conn.commit()
     
-    c.execute('SELECT user_id, username, premium, premium_expires, is_admin, messages_today, total_messages, joined_at FROM users ORDER BY user_id DESC')
+    # Получаем всех пользователей
+    c.execute('SELECT user_id, username, premium, premium_expires, is_admin, messages_today, test_used, joined_at FROM users ORDER BY user_id DESC')
     users = c.fetchall()
-    c.execute('SELECT COUNT(*) FROM users'); total_users = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM users WHERE premium = 1'); premium_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 1'); admin_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM banned'); banned_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM muted'); muted_count = c.fetchone()[0]
+    
+    # Статистика
+    c.execute('SELECT COUNT(*) FROM users')
+    total_users = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE premium = 1')
+    premium_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 1')
+    admin_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM banned')
+    banned_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM muted')
+    muted_count = c.fetchone()[0]
     conn.close()
     
+    # Генерируем HTML таблицы
     users_html = ""
     for user in users:
-        uid, username, premium, expires, is_admin_flag, msgs_today, total_msgs, joined = user
+        uid, username, premium, expires, is_admin_flag, msgs_today, test_used, joined = user
+        
         if uid == OWNER_ID:
             status = '<span style="background:#da3633;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">👑 ВЛАДЕЛЕЦ</span>'
         elif is_admin_flag == 1:
@@ -826,30 +978,103 @@ def admin_panel():
             status = '<span style="background:#2ea043;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">💎 PREMIUM</span>'
         else:
             status = '<span style="background:#30363d;color:#8b949e;padding:1px 8px;border-radius:10px;font-size:9px;">🔓 Бесплатный</span>'
+        
+        # Проверка бана/мута
+        if is_banned(uid):
+            status += ' <span style="background:#da3633;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">🚫</span>'
+        if is_muted(uid):
+            status += ' <span style="background:#f0883e;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">🔇</span>'
+        
         expires_str = format_date(expires) if expires else "—"
         username_display = f"@{username}" if username and username != "unknown" else "Не указан"
-        users_html += f'<tr><td><code>{uid}</code></td><td>{username_display}</td><td>{status}</td><td>{msgs_today}</td><td>{total_msgs}</td><td>{expires_str}</td><td><div style="display:flex;gap:2px;flex-wrap:wrap;"><a href="?user_id={OWNER_ID}&action=giveprem&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎+</a><a href="?user_id={OWNER_ID}&action=delprem&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎-</a><a href="?user_id={OWNER_ID}&action=giveadmin&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑+</a><a href="?user_id={OWNER_ID}&action=deladmin&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑-</a><a href="?user_id={OWNER_ID}&action=ban&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🚫</a><a href="?user_id={OWNER_ID}&action=unban&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">✅</a><a href="?user_id={OWNER_ID}&action=mute&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔇</a><a href="?user_id={OWNER_ID}&action=unmute&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔊</a></div></td></tr>'
+        
+        users_html += f'''
+        <tr>
+            <td><code>{uid}</code></td>
+            <td>{username_display}</td>
+            <td>{status}</td>
+            <td>{msgs_today}</td>
+            <td>{test_used}</td>
+            <td>{expires_str}</td>
+            <td>
+                <div style="display:flex;gap:2px;flex-wrap:wrap;">
+                    <a href="?user_id={OWNER_ID}&action=giveprem&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎+</a>
+                    <a href="?user_id={OWNER_ID}&action=delprem&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎-</a>
+                    <a href="?user_id={OWNER_ID}&action=giveadmin&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑+</a>
+                    <a href="?user_id={OWNER_ID}&action=deladmin&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑-</a>
+                    <a href="?user_id={OWNER_ID}&action=ban&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🚫</a>
+                    <a href="?user_id={OWNER_ID}&action=unban&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">✅</a>
+                    <a href="?user_id={OWNER_ID}&action=mute&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔇</a>
+                    <a href="?user_id={OWNER_ID}&action=unmute&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔊</a>
+                </div>
+            </td>
+        </tr>
+        '''
+    
     if not users:
         users_html = '<tr><td colspan="7" style="text-align:center;color:#8b949e;padding:15px;">Нет пользователей</td></tr>'
     
     return f'''
     <!DOCTYPE html>
     <html>
-    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>👑 Админ-панель</title>
-    <style>*{{margin:0;padding:0;box-sizing:border-box;}}body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:15px;}}h1{{color:#58a6ff;font-size:20px;margin-bottom:4px;}}.sub{{color:#8b949e;font-size:13px;margin-bottom:15px;}}.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-bottom:15px;}}.card{{background:#161b22;padding:10px 14px;border-radius:8px;border:1px solid #30363d;}}.card span{{color:#8b949e;font-size:10px;}}.card .num{{font-size:20px;font-weight:700;color:#58a6ff;}}.card .num.gold{{color:#f0883e;}}.card .num.red{{color:#f85149;}}.section{{background:#161b22;border-radius:8px;border:1px solid #30363d;padding:12px 16px;margin-bottom:12px;}}.section h2{{font-size:14px;margin-bottom:8px;color:#58a6ff;}}table{{width:100%;border-collapse:collapse;font-size:11px;}}th{{background:#1c2128;color:#8b949e;font-weight:600;padding:6px 8px;text-align:left;}}td{{padding:5px 8px;border-bottom:1px solid #30363d;}}tr:hover{{background:#1c2128;}}.back{{color:#58a6ff;text-decoration:none;}}@media(max-width:600px){{table{{font-size:9px;}}td,th{{padding:3px 4px;}}}}
-    </style></head>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>👑 Админ-панель</title>
+        <style>
+            *{{margin:0;padding:0;box-sizing:border-box;}}
+            body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:15px;}}
+            h1{{color:#58a6ff;font-size:20px;margin-bottom:4px;}}
+            .sub{{color:#8b949e;font-size:13px;margin-bottom:15px;}}
+            .stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-bottom:15px;}}
+            .card{{background:#161b22;padding:10px 14px;border-radius:8px;border:1px solid #30363d;}}
+            .card span{{color:#8b949e;font-size:10px;}}
+            .card .num{{font-size:20px;font-weight:700;color:#58a6ff;}}
+            .card .num.gold{{color:#f0883e;}}
+            .card .num.red{{color:#f85149;}}
+            .section{{background:#161b22;border-radius:8px;border:1px solid #30363d;padding:12px 16px;margin-bottom:12px;}}
+            .section h2{{font-size:14px;margin-bottom:8px;color:#58a6ff;}}
+            table{{width:100%;border-collapse:collapse;font-size:11px;}}
+            th{{background:#1c2128;color:#8b949e;font-weight:600;padding:6px 8px;text-align:left;}}
+            td{{padding:5px 8px;border-bottom:1px solid #30363d;}}
+            tr:hover{{background:#1c2128;}}
+            .back{{color:#58a6ff;text-decoration:none;}}
+            @media(max-width:600px){{table{{font-size:9px;}}td,th{{padding:3px 4px;}}}}
+        </style>
+    </head>
     <body>
-    <h1>👑 Админ-панель</h1>
-    <p class="sub">👤 Владелец: @flidges | <a href="/" class="back">← На главную</a></p>
-    <div class="stats">
-        <div class="card"><span>👥 Всего</span><div class="num">{total_users}</div></div>
-        <div class="card"><span>💎 Premium</span><div class="num gold">{premium_count}</div></div>
-        <div class="card"><span>👑 Админов</span><div class="num gold">{admin_count}</div></div>
-        <div class="card"><span>🚫 Забанено</span><div class="num red">{banned_count}</div></div>
-        <div class="card"><span>🔇 Замучено</span><div class="num gold">{muted_count}</div></div>
-    </div>
-    <div class="section"><h2>👥 Пользователи</h2><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сегодня</th><th>Всего</th><th>Premium до</th><th>Действия</th></tr></thead><tbody>{users_html}</tbody></table></div></div>
-    </body></html>
+        <h1>👑 Админ-панель</h1>
+        <p class="sub">👤 Владелец: @flidges | <a href="/" class="back">← На главную</a></p>
+        
+        <div class="stats">
+            <div class="card"><span>👥 Всего</span><div class="num">{total_users}</div></div>
+            <div class="card"><span>💎 Premium</span><div class="num gold">{premium_count}</div></div>
+            <div class="card"><span>👑 Админов</span><div class="num gold">{admin_count}</div></div>
+            <div class="card"><span>🚫 Забанено</span><div class="num red">{banned_count}</div></div>
+            <div class="card"><span>🔇 Замучено</span><div class="num gold">{muted_count}</div></div>
+        </div>
+        
+        <div class="section">
+            <h2>👥 Пользователи</h2>
+            <div style="overflow-x:auto;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Статус</th>
+                            <th>Сегодня</th>
+                            <th>Тест</th>
+                            <th>Premium до</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>{users_html}</tbody>
+                </table>
+            </div>
+        </div>
+    </body>
+    </html>
     '''
 
 # ============================================================
@@ -865,17 +1090,22 @@ def chat_full():
         user_id = int(request.form.get('user_id', 1))
         message = request.form.get('message', '')
         files = request.files.getlist('files')
+        
         if not message and not files:
             return jsonify({'error': 'Напиши что-нибудь или прикрепи файл!'})
+        
         ensure_user(user_id, f"user_{user_id}")
+        
         image_description = None
         for file in files:
             if file.content_type and file.content_type.startswith('image/'):
                 content = file.read()
                 image_description = analyze_image(content)
                 break
+        
         if files and not image_description:
             image_description = f"📎 Получен файл: {', '.join([f.filename for f in files])}"
+        
         response = process_message(user_id, message, image_description)
         return jsonify({'reply': response})
     except Exception as e:
@@ -892,9 +1122,10 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ С АДМИНКОЙ")
+    print("🧠 AWESOME AI — ВЕБ-САЙТ С БАЗОЙ ОТ ТГ БОТА")
     print("=" * 60)
     print(f"👑 Владелец ID: {OWNER_ID}")
+    print(f"📁 База данных: {DB_PATH} (ОБЩАЯ С ТГ БОТОМ)")
     print(f"🌐 http://localhost:{port}")
     print(f"👑 Админ-панель: http://localhost:{port}/admin?user_id={OWNER_ID}")
     print("=" * 60)
