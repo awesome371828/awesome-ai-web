@@ -22,7 +22,7 @@ CORS(app)
 # ============================================================
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY") or "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
-OWNER_ID = 6652898792
+OWNER_ID = 1786791896384
 
 # ============================================================
 # БАЗА ДАННЫХ
