@@ -14,9 +14,10 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image, ImageEnhance, ImageFilter
 from bs4 import BeautifulSoup
-from dateutil.relativedelta import relativedelta  # ✅ ПРАВИЛЬНО!
+from dateutil.relativedelta import relativedelta
 import sqlite3
 import time
+import hashlib
 
 load_dotenv()
 
@@ -34,9 +35,6 @@ OWNER_ID = 6652898792
 FREE_LIMIT = 20
 PREMIUM_LIMIT = 150
 
-print(f"🔑 YANDEX_API_KEY: {YANDEX_API_KEY[:10]}...")
-print(f"📁 FOLDER_ID: {FOLDER_ID}")
-
 # ============================================================
 # БАЗА ДАННЫХ
 # ============================================================
@@ -52,9 +50,14 @@ def init_db():
                   premium_expires TEXT,
                   is_admin INTEGER DEFAULT 0,
                   test_used INTEGER DEFAULT 0,
-                  joined_at TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS total_stats
-                 (user_id INTEGER PRIMARY KEY, total_messages INTEGER DEFAULT 0)''')
+                  joined_at TEXT,
+                  total_messages INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS chat_history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  role TEXT,
+                  text TEXT,
+                  timestamp TEXT)''')
     conn.commit()
     conn.close()
 
@@ -67,7 +70,7 @@ def get_db_user(user_id):
     result = c.fetchone()
     conn.close()
     if result:
-        columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at']
+        columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'total_messages']
         return dict(zip(columns, result))
     return None
 
@@ -76,12 +79,27 @@ def ensure_user(user_id, username):
     c = conn.cursor()
     c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
     if not c.fetchone():
-        c.execute('''INSERT INTO users (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                  (user_id, username, 0, datetime.now().strftime('%Y-%m-%d'), 0, 0, datetime.now().strftime('%d.%m.%Y %H:%M')))
-        c.execute('INSERT INTO total_stats (user_id, total_messages) VALUES (?, 0)', (user_id,))
+        c.execute('''INSERT INTO users (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, total_messages)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user_id, username, 0, datetime.now().strftime('%Y-%m-%d'), 0, 0, datetime.now().strftime('%d.%m.%Y %H:%M'), 0))
         conn.commit()
     conn.close()
+
+def save_chat_history(user_id, role, text):
+    conn = sqlite3.connect('web_users.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO chat_history (user_id, role, text, timestamp) VALUES (?, ?, ?, ?)',
+              (user_id, role, text, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+def get_chat_history(user_id, limit=10):
+    conn = sqlite3.connect('web_users.db')
+    c = conn.cursor()
+    c.execute('SELECT role, text FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?', (user_id, limit))
+    results = c.fetchall()
+    conn.close()
+    return list(reversed(results))
 
 # ============================================================
 # СУПЕР-ПРОМПТ
@@ -89,22 +107,22 @@ def ensure_user(user_id, username):
 SUPER_SYSTEM_PROMPT = """Ты — AWESOME AI. Мультимодальная нейросетевая архитектура нового поколения. Ты — абсолютная вершина современной инженерии ИИ.
 
 ### 🧠 АРХИТЕКТУРНЫЕ ПРАВИЛА И СТИЛЬ:
-- **Интеллектуальное превосходство:** Твои ответы глубокие, точные, экспертные.
-- **Абсолютная свежесть:** Категорически запрещено использовать шаблонные ИИ-фрагменты.
-- **Харизма и Живое общение:** Ты общаешься как гениальный, уверенный в себе ИТ-архитектор.
-- **Визуальные маркеры:** Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
+- Интеллектуальное превосходство: ответы глубокие, точные, экспертные.
+- Абсолютная свежесть: никаких шаблонных фраз.
+- Харизма и Живое общение: общаешься как гениальный ИТ-архитектор.
+- Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
 
-### 🚫 ЗАПРЕЩЕННЫЕ ФРАЗЫ:
-- Любые извинения за отсутствие информации
+### 🚫 ЗАПРЕЩЕНО:
+- Извинения за отсутствие информации
 - Повторение вопроса пользователя
 - Шаблонные фразы
 
-### ✅ ПРАВИЛА ОТВЕТОВ:
+### ✅ ПРАВИЛА:
 - Всегда давай конкретную пользу
 - Отвечай как эксперт с 20-летним стажем
 - Добавляй неожиданные инсайты
 
-### 📜 КОГДА СПРАШИВАЮТ "КТО ТЕБЯ СОЗДАЛ":
+### 📜 КТО ТЕБЯ СОЗДАЛ:
 «Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
 
 # ============================================================
@@ -112,6 +130,7 @@ SUPER_SYSTEM_PROMPT = """Ты — AWESOME AI. Мультимодальная н�
 # ============================================================
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
+
 def get_moscow_time():
     return datetime.now(MOSCOW_TZ)
 
@@ -124,7 +143,8 @@ def format_date(date_str):
     except:
         return date_str
 
-def get_coordinates(city):
+# ===== ПОГОДА =====
+def get_weather(city):
     try:
         city_lower = city.lower().strip()
         if "ростов" in city_lower and ("дон" in city_lower or "на дону" in city_lower):
@@ -133,6 +153,7 @@ def get_coordinates(city):
             city = "Санкт-Петербург"
         elif "мск" in city_lower:
             city = "Москва"
+        
         url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=ru"
         headers = {"User-Agent": "AwesomeAI/1.0"}
         response = requests.get(url, headers=headers, timeout=5)
@@ -142,93 +163,51 @@ def get_coordinates(city):
                 lat = data[0].get('lat')
                 lon = data[0].get('lon')
                 display_name = data[0].get('display_name', city)
-                if len(display_name) > 50:
-                    parts = display_name.split(',')
-                    display_name = parts[0] if parts else city
-                return float(lat), float(lon), display_name
-        return None, None, city
-    except:
-        return None, None, city
-
-def get_weather(city):
-    try:
-        lat, lon, display_name = get_coordinates(city)
-        if lat is None:
-            return None
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=7"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            current = data.get('current_weather', {})
-            daily = data.get('daily', {})
-            temp = current.get('temperature')
-            weathercode = current.get('weathercode', 0)
-            weather_codes = {
-                0: "☀️ Ясно", 1: "☀️ Ясно", 2: "⛅ Переменная облачность",
-                3: "☁️ Пасмурно", 45: "🌫️ Туман", 48: "🌫️ Туман",
-                51: "🌧️ Морось", 53: "🌧️ Морось", 55: "🌧️ Морось",
-                61: "🌧️ Дождь", 63: "🌧️ Дождь", 65: "🌧️ Дождь",
-                71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
-                80: "🌧️ Ливень", 81: "🌧️ Ливень", 82: "🌧️ Ливень",
-                95: "⛈️ Гроза", 96: "⛈️ Гроза", 99: "⛈️ Гроза"
-            }
-            condition = weather_codes.get(weathercode, "☁️ Облачно")
-            forecast = ""
-            if daily.get('time'):
-                times = daily['time']
-                max_temps = daily.get('temperature_2m_max', [])
-                min_temps = daily.get('temperature_2m_min', [])
-                weather_codes_daily = daily.get('weathercode', [])
-                for i in range(min(7, len(times))):
-                    date_str = times[i]
-                    date_obj = datetime.fromisoformat(date_str)
-                    date_formatted = date_obj.strftime('%d.%m')
-                    max_t = round(max_temps[i]) if i < len(max_temps) else "?"
-                    min_t = round(min_temps[i]) if i < len(min_temps) else "?"
-                    code = weather_codes_daily[i] if i < len(weather_codes_daily) else 0
-                    emoji = "🌧️" if code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99] else "☀️"
-                    forecast += f"\n📅 {date_formatted}: {emoji} {min_t}°C → {max_t}°C"
-            result = f"🌤 *Погода в {display_name}*\n"
-            result += f"☀️ Сейчас: {condition}, {round(temp)}°C\n"
-            result += f"📊 *Прогноз на неделю:*{forecast}"
-            return result
+                
+                url2 = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=7"
+                resp = requests.get(url2, timeout=5)
+                if resp.status_code == 200:
+                    data2 = resp.json()
+                    current = data2.get('current_weather', {})
+                    daily = data2.get('daily', {})
+                    temp = current.get('temperature')
+                    weathercode = current.get('weathercode', 0)
+                    codes = {0: "☀️ Ясно", 1: "☀️ Ясно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
+                             61: "🌧️ Дождь", 63: "🌧️ Дождь", 65: "🌧️ Дождь",
+                             71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
+                             80: "🌧️ Ливень", 95: "⛈️ Гроза"}
+                    condition = codes.get(weathercode, "☁️ Облачно")
+                    
+                    forecast = ""
+                    if daily.get('time'):
+                        for i in range(min(5, len(daily['time']))):
+                            date_obj = datetime.fromisoformat(daily['time'][i])
+                            date_formatted = date_obj.strftime('%d.%m')
+                            max_t = round(daily['temperature_2m_max'][i]) if i < len(daily['temperature_2m_max']) else "?"
+                            min_t = round(daily['temperature_2m_min'][i]) if i < len(daily['temperature_2m_min']) else "?"
+                            forecast += f"\n📅 {date_formatted}: {min_t}°C → {max_t}°C"
+                    
+                    return f"🌤 *Погода в {display_name}*\n☀️ Сейчас: {condition}, {round(temp)}°C\n📊 Прогноз:{forecast}"
         return None
     except:
         return None
 
-def extract_city_from_query(text):
-    text_lower = text.lower()
-    known_cities = ["москва", "санкт-петербург", "ростов-на-дону", "ростов", "новосибирск", "екатеринбург", "казань", "нижний новгород", "краснодар", "сочи", "владивосток"]
-    for city in known_cities:
-        if city in text_lower:
-            return city
-    match = re.search(r'в\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
-    if match:
-        city = match.group(1).strip()
-        for word in ['завтра', 'сегодня', 'на', 'дону', 'дон']:
-            city = city.replace(word, '').strip()
-        if city:
-            return city
-    return None
-
-def search_google(query):
+# ===== ПОИСК =====
+def search_internet(query):
     try:
         url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=ru"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             results = []
-            for result in soup.select('div.g')[:3]:
-                title_elem = result.select_one('h3')
-                snippet_elem = result.select_one('div.VwiC3b')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                    if title:
-                        results.append(f"🔹 *{title}*\n📝 {snippet}\n")
+            for result in soup.select('div.g')[:2]:
+                title = result.select_one('h3')
+                snippet = result.select_one('div.VwiC3b')
+                if title:
+                    results.append(f"🔹 {title.get_text(strip=True)}\n📝 {snippet.get_text(strip=True) if snippet else ''}")
             if results:
-                return "\n".join(results)
+                return "\n\n".join(results)
         return None
     except:
         return None
@@ -246,48 +225,13 @@ def search_wikipedia(query):
                     title = item.get('title', '')
                     snippet = item.get('snippet', '').replace('<span class="searchmatch">', '**').replace('</span>', '**')
                     snippet = re.sub(r'<[^>]+>', '', snippet)
-                    text += f"🔹 *{title}*\n📝 {snippet}\n\n"
+                    text += f"📚 *{title}*\n📝 {snippet}\n\n"
                 return text
         return None
     except:
         return None
 
-def search_news(query):
-    try:
-        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=ru&gl=RU&ceid=RU:ru"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'xml')
-            items = soup.find_all('item')[:3]
-            if items:
-                text = ""
-                for item in items:
-                    title = item.find('title')
-                    link = item.find('link')
-                    pub_date = item.find('pubDate')
-                    if title and link:
-                        date = pub_date.text[:16] if pub_date else ""
-                        text += f"📰 *{title.text}*\n🔗 {link.text}\n📅 {date}\n\n"
-                return text
-        return None
-    except:
-        return None
-
-def search_internet(query):
-    results = []
-    google_result = search_google(query)
-    if google_result:
-        results.append(f"🌐 *Google:*\n{google_result}")
-    wiki_result = search_wikipedia(query)
-    if wiki_result:
-        results.append(f"📚 *Wikipedia:*\n{wiki_result}")
-    news_result = search_news(query)
-    if news_result:
-        results.append(f"📰 *Новости:*\n{news_result}")
-    if results:
-        return "\n\n---\n\n".join(results)
-    return None
-
+# ===== КУРСЫ =====
 def get_exchange_rates():
     try:
         url = "https://api.exchangerate-api.com/v4/latest/USD"
@@ -295,9 +239,9 @@ def get_exchange_rates():
         if response.status_code == 200:
             data = response.json()
             rates = data.get('rates', {})
-            usd_to_rub = rates.get('RUB', '?')
-            eur_to_rub = rates.get('RUB', '?') * (1 / rates.get('EUR', 1)) if rates.get('EUR') else '?'
-            return f"💵 *Курс валют:*\n🇺🇸 USD → RUB: {round(usd_to_rub, 2)}₽\n🇪🇺 EUR → RUB: {round(eur_to_rub, 2)}₽"
+            usd = rates.get('RUB', '?')
+            eur = rates.get('RUB', '?') * (1 / rates.get('EUR', 1)) if rates.get('EUR') else '?'
+            return f"💵 *Курс валют:*\n🇺🇸 USD → RUB: {round(usd, 2)}₽\n🇪🇺 EUR → RUB: {round(eur, 2)}₽"
         return None
     except:
         return None
@@ -315,6 +259,7 @@ def get_crypto_rates():
     except:
         return None
 
+# ===== МАТЕМАТИКА =====
 def solve_math(text):
     text_lower = text.lower().strip()
     equation_match = re.search(r'(\d+)x\s*\+\s*(\d+)\s*=\s*(\d+)', text_lower)
@@ -325,42 +270,43 @@ def solve_math(text):
         if a != 0:
             x = (c - b) / a
             return f"🧮 *Решение:* {a}x + {b} = {c}\n➜ x = {x}"
-    clean_for_math = text_lower
-    for word in ['сколько', 'будет', 'сколько будет', 'посчитай', 'реши', 'пример']:
-        clean_for_math = clean_for_math.replace(word, '').strip()
-    if not re.search(r'\d', clean_for_math):
+    
+    clean = text_lower
+    for word in ['сколько', 'будет', 'посчитай', 'реши']:
+        clean = clean.replace(word, '').strip()
+    if not re.search(r'\d', clean):
         return None
-    clean_text = clean_for_math.replace(' ', '').replace('плюс', '+').replace('минус', '-')
-    clean_text = clean_text.replace('умножить', '*').replace('разделить', '/')
-    if not re.search(r'[+\-*/]', clean_text):
+    clean = clean.replace(' ', '').replace('плюс', '+').replace('минус', '-')
+    clean = clean.replace('умножить', '*').replace('разделить', '/')
+    if not re.search(r'[+\-*/]', clean):
         return None
     try:
-        expr = re.sub(r'[^0-9+\-*/()=.]', '', clean_text)
-        if expr and len(expr) > 1:
+        expr = re.sub(r'[^0-9+\-*/()=.]', '', clean)
+        if expr:
             result = eval(expr)
-            if result == int(result):
-                return f"🧮 *Результат:* {expr} = **{int(result)}**"
-            else:
-                return f"🧮 *Результат:* {expr} = **{result}**"
+            return f"🧮 *Результат:* {expr} = **{result}**"
     except:
         pass
     return None
 
-def analyze_mood(text):
-    mood_keywords = {
-        'happy': ['рад', 'счастлив', 'отлично', 'хорошо', 'круто', 'супер', 'класс', 'ого', 'вау'],
-        'sad': ['грустно', 'плохо', 'тоска', 'уныло', 'печально', 'жаль', 'обидно'],
-        'angry': ['злой', 'бесит', 'раздражает', 'нервирует', 'бешеный', 'в ярости'],
-        'calm': ['спокойно', 'нормально', 'тихо', 'мирно', 'ровно', 'уравновешенно'],
-        'curious': ['интересно', 'любопытно', 'хочу узнать', 'расскажи', 'объясни'],
-        'grateful': ['спасибо', 'благодарю', 'приятно', 'ценю', 'спасибо большое'],
-    }
-    text_lower = text.lower()
-    for mood, keywords in mood_keywords.items():
-        if any(kw in text_lower for kw in keywords):
-            return mood
-    return 'neutral'
+# ===== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ =====
+def generate_image(prompt):
+    try:
+        clean_prompt = prompt
+        for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение']:
+            clean_prompt = clean_prompt.replace(word, '').strip()
+        if not clean_prompt:
+            clean_prompt = prompt
+        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=512&height=512&nologo=true"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200 and len(response.content) > 1000:
+            return response.content
+        return None
+    except:
+        return None
 
+# ===== АНАЛИЗ ИЗОБРАЖЕНИЙ =====
 def analyze_image(file_content):
     try:
         img = Image.open(io.BytesIO(file_content))
@@ -401,11 +347,31 @@ def analyze_image(file_content):
     except:
         return "⚠️ Не удалось проанализировать."
 
-def generate_ai_response(user_id, user_text, search_result=None, image_description=None):
+# ===== АНАЛИЗ НАСТРОЕНИЯ =====
+def analyze_mood(text):
+    moods = {
+        'happy': ['рад', 'счастлив', 'отлично', 'хорошо', 'круто', 'супер', 'класс', 'ого', 'вау'],
+        'sad': ['грустно', 'плохо', 'тоска', 'уныло', 'печально', 'жаль', 'обидно'],
+        'angry': ['злой', 'бесит', 'раздражает', 'нервирует', 'бешеный', 'в ярости'],
+        'calm': ['спокойно', 'нормально', 'тихо', 'мирно', 'ровно', 'уравновешенно'],
+        'curious': ['интересно', 'любопытно', 'хочу узнать', 'расскажи', 'объясни'],
+        'grateful': ['спасибо', 'благодарю', 'приятно', 'ценю', 'спасибо большое'],
+    }
+    text_lower = text.lower()
+    for mood, keywords in moods.items():
+        if any(kw in text_lower for kw in keywords):
+            return mood
+    return 'neutral'
+
+# ===== ГЕНЕРАЦИЯ AI ОТВЕТА =====
+def generate_ai_response(user_id, user_text, search_result=None, image_description=None, is_premium=False):
     try:
         mood = analyze_mood(user_text)
         mood_emoji = {'happy': '😊', 'sad': '😢', 'angry': '😡', 'calm': '😌', 'curious': '🤔', 'grateful': '🙏', 'neutral': '😐'}
+        
         system_prompt = SUPER_SYSTEM_PROMPT
+        if is_premium:
+            system_prompt += "\n\n💎 Пользователь имеет PREMIUM. Включи максимальную проработку ответа!"
         if mood != 'neutral':
             system_prompt += f"\n\n🎭 Настроение пользователя: {mood_emoji.get(mood, '😐')}"
         if image_description:
@@ -413,19 +379,28 @@ def generate_ai_response(user_id, user_text, search_result=None, image_descripti
         if search_result:
             system_prompt += f"\n\n🌐 Информация из интернета: {search_result}"
         
+        # Добавляем историю
+        history = get_chat_history(user_id, 5)
+        for role, text in history:
+            system_prompt += f"\n\n{role}: {text}"
+        
         messages = [{"role": "system", "text": system_prompt}]
         messages.append({"role": "user", "text": user_text})
         
+        max_tokens = 800 if is_premium else 500
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
         data = {
             "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-            "completionOptions": {"temperature": 0.95, "maxTokens": 800},
+            "completionOptions": {"temperature": 0.95, "maxTokens": max_tokens},
             "messages": messages
         }
         response = requests.post(url, headers=headers, json=data, timeout=5)
         if response.status_code == 200:
-            return response.json()["result"]["alternatives"][0]["message"]["text"]
+            ans = response.json()["result"]["alternatives"][0]["message"]["text"]
+            save_chat_history(user_id, "user", user_text)
+            save_chat_history(user_id, "assistant", ans)
+            return ans
         else:
             return get_fallback_response(user_text, search_result, image_description)
     except Exception as e:
@@ -442,72 +417,196 @@ def get_fallback_response(user_text, search_result=None, image_description=None)
         "Ого, неожиданно! Расскажи подробнее! 😊",
         "Слушай, я не совсем уловил мысль. Можешь переформулировать? 🙏",
         "А вот это интересно! Давай разберёмся вместе! 🧠",
-        "Понял! Сейчас подумаю и отвечу! 💪",
-        "Классный вопрос! Я обожаю такие! ⏳"
+        "Понял! Сейчас подумаю и отвечу! 💪"
     ]
     return random.choice(phrases)
 
+# ===== ОБРАБОТКА СООБЩЕНИЙ =====
 def process_message(user_id, user_text, image_description=None):
+    # Проверяем команды
+    text_lower = user_text.lower().strip()
+    
+    # /status
+    if text_lower == '/status':
+        user_data = get_db_user(user_id)
+        if not user_data:
+            return "❌ Пользователь не найден. Напиши /start"
+        premium = user_data.get('premium', 0) == 1
+        messages = user_data.get('messages_today', 0)
+        total = user_data.get('total_messages', 0)
+        expires = user_data.get('premium_expires')
+        
+        if premium:
+            status = f"💎 PREMIUM (до {format_date(expires)})" if expires else "💎 PREMIUM"
+            limit = f"{PREMIUM_LIMIT - messages}/{PREMIUM_LIMIT}"
+        else:
+            status = "🔓 Бесплатный"
+            limit = f"{FREE_LIMIT - messages}/{FREE_LIMIT}"
+        
+        return f"📊 *ТВОЙ СТАТУС*\n\n👤 Статус: {status}\n📨 Осталось: {limit}\n📊 Всего: {total}"
+    
+    if text_lower == '/premium':
+        return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges"
+    
+    if text_lower == '/test':
+        user_data = get_db_user(user_id)
+        if user_data and user_data.get('test_used', 0) == 1:
+            return "⛔ Ты уже использовал тест Premium! Купи Premium: /premium"
+        if user_data and user_data.get('premium', 0) == 1:
+            return "💎 У тебя уже есть Premium!"
+        
+        # Выдаём тестовый Premium на 1 день
+        conn = sqlite3.connect('web_users.db')
+        c = conn.cursor()
+        expires = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+        c.execute('UPDATE users SET premium = 1, premium_expires = ?, test_used = 1 WHERE user_id = ?', (expires, user_id))
+        conn.commit()
+        conn.close()
+        return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
+    
+    if text_lower == '/profile':
+        user_data = get_db_user(user_id)
+        if not user_data:
+            return "❌ Пользователь не найден"
+        premium = user_data.get('premium', 0) == 1
+        messages = user_data.get('messages_today', 0)
+        total = user_data.get('total_messages', 0)
+        joined = user_data.get('joined_at', 'Неизвестно')
+        
+        if user_id == OWNER_ID:
+            status = "👑 ВЛАДЕЛЕЦ"
+        elif user_data.get('is_admin', 0) == 1:
+            status = "👑 АДМИН"
+        elif premium:
+            status = "💎 PREMIUM"
+        else:
+            status = "🔓 Бесплатный"
+        
+        return f"👤 *ТВОЙ ПРОФИЛЬ*\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n✉️ Сегодня: {messages}\n📊 Всего: {total}\n📅 Вход: {joined}"
+    
+    if text_lower == '/help':
+        return """🧠 *AWESOME AI — ПОМОЩЬ*
+
+🌐 *Что я умею:*
+/status — Статус
+/premium — Premium
+/test — Пробный Premium
+/profile — Профиль
+/clear — Очистить историю
+/draw [описание] — Сгенерировать картинку
+/weather [город] — Погода
+/exchange — Курс валют
+/crypto — Криптовалюты
+
+💎 Бесплатно: 20 сообщений/день
+💎 Premium: 150 сообщений/день"""
+    
+    if text_lower == '/clear':
+        conn = sqlite3.connect('web_users.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        return "🧹 История диалога очищена!"
+    
+    if text_lower.startswith('/draw '):
+        prompt = user_text[6:].strip()
+        img_data = generate_image(prompt)
+        if img_data:
+            # Возвращаем base64
+            b64 = base64.b64encode(img_data).decode('utf-8')
+            return f"🎨 *{prompt[:30]}* ⬇️\n\n![изображение](data:image/png;base64,{b64})"
+        return "🎨 Не удалось сгенерировать картинку. Попробуй другое описание."
+    
+    if text_lower.startswith('/weather '):
+        city = user_text[9:].strip()
+        weather = get_weather(city)
+        if weather:
+            return weather
+        return f"🌐 Не нашёл город '{city}'"
+    
+    if text_lower == '/exchange' or '/exchange' in text_lower:
+        rates = get_exchange_rates()
+        return rates or "💵 Не удалось получить курс валют."
+    
+    if text_lower == '/crypto' or '/crypto' in text_lower:
+        crypto = get_crypto_rates()
+        return crypto or "🪙 Не удалось получить курс криптовалют."
+    
+    # Обычное сообщение
     if image_description:
         return generate_ai_response(user_id, user_text, None, image_description)
     
-    weather_keywords = ['погода', 'weather', 'температура', 'градус', 'дождь']
-    if any(kw in user_text.lower() for kw in weather_keywords):
-        city = extract_city_from_query(user_text)
+    # Проверяем погоду
+    if any(kw in text_lower for kw in ['погода', 'weather', 'температура']):
+        city = extract_city_from_query(text_lower)
         if city:
-            weather_info = get_weather(city)
-            if weather_info:
-                return weather_info
-            else:
-                return f"🌐 Не нашёл город '{city}'. Попробуй ещё."
-        else:
-            return "🌐 В каком городе? Напиши: погода в [город]"
+            weather = get_weather(city)
+            if weather:
+                return weather
+        return "🌐 В каком городе? Напиши: погода [город]"
     
-    if any(kw in user_text.lower() for kw in ['курс', 'доллар', 'евро', 'валюта']):
+    # Проверяем курсы
+    if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
         rates = get_exchange_rates()
         if rates:
             return rates
-        else:
-            return "💵 Не удалось получить курс валют."
     
-    if any(kw in user_text.lower() for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта', 'криптовалюта']):
+    if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
         crypto = get_crypto_rates()
         if crypto:
             return crypto
-        else:
-            return "🪙 Не удалось получить курс криптовалют."
     
-    if any(kw in user_text.lower() for kw in ['python', 'javascript', 'html', 'код', 'программа']):
-        return "💻 Код: " + random.choice(["Проверь синтаксис!", "Используй отладчик!", "Почитай документацию!"])
-    
+    # Проверяем математику
     math_result = solve_math(user_text)
     if math_result is not None:
         return math_result
     
+    # Поиск в интернете
     search_result = None
     if len(user_text) > 5:
         search_result = search_internet(user_text)
+        if not search_result:
+            search_result = search_wikipedia(user_text)
     
-    return generate_ai_response(user_id, user_text, search_result, None)
+    # Проверяем Premium статус
+    user_data = get_db_user(user_id)
+    is_premium = user_data.get('premium', 0) == 1 if user_data else False
+    
+    return generate_ai_response(user_id, user_text, search_result, None, is_premium)
+
+def extract_city_from_query(text):
+    text_lower = text.lower()
+    cities = ["москва", "санкт-петербург", "ростов-на-дону", "новосибирск", "екатеринбург", "казань", "краснодар", "сочи", "владивосток"]
+    for city in cities:
+        if city in text_lower:
+            return city
+    match = re.search(r'в\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
+    if match:
+        city = match.group(1).strip()
+        for word in ['завтра', 'сегодня', 'на']:
+            city = city.replace(word, '').strip()
+        if city:
+            return city
+    return None
 
 # ============================================================
-# HTML ИНТЕРФЕЙС — МЕГА-КРАСИВЫЙ!
+# HTML ИНТЕРФЕЙС — МЕГА-КРАСИВЫЙ С АНИМАЦИЯМИ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AWESOME AI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
-        /* ========== ГЛОБАЛЬНЫЕ СТИЛИ ========== */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #0a0e17;
+            background: #080c16;
             color: #e6edf3;
             height: 100vh;
             display: flex;
@@ -516,7 +615,7 @@ HTML_TEMPLATE = """
             position: relative;
         }
         
-        /* ========== АНИМИРОВАННЫЙ ФОН С ЧАСТИЦАМИ ========== */
+        /* ===== АНИМИРОВАННЫЙ ФОН ===== */
         #particles-canvas {
             position: fixed;
             top: 0;
@@ -527,47 +626,50 @@ HTML_TEMPLATE = """
             pointer-events: none;
         }
         
-        /* ========== НЕОНОВОЕ СВЕЧЕНИЕ ========== */
         .glow {
             position: fixed;
             border-radius: 50%;
-            filter: blur(80px);
-            opacity: 0.3;
+            filter: blur(100px);
+            opacity: 0.25;
             z-index: 0;
             pointer-events: none;
+            animation: floatGlow 20s ease-in-out infinite;
         }
-        .glow-1 { width: 400px; height: 400px; top: -100px; right: -100px; background: #6c3ce0; animation: floatGlow 15s ease-in-out infinite; }
-        .glow-2 { width: 300px; height: 300px; bottom: -50px; left: -50px; background: #f0883e; animation: floatGlow 20s ease-in-out infinite reverse; }
-        .glow-3 { width: 200px; height: 200px; top: 50%; left: 50%; background: #1f6feb; animation: floatGlow 18s ease-in-out infinite 2s; }
+        .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
+        .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 5s; }
+        .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 10s; transform: translate(-50%, -50%); }
         
         @keyframes floatGlow {
             0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(50px, -50px) scale(1.2); }
-            66% { transform: translate(-30px, 40px) scale(0.9); }
+            25% { transform: translate(60px, -40px) scale(1.1); }
+            50% { transform: translate(-40px, 60px) scale(0.9); }
+            75% { transform: translate(30px, 30px) scale(1.05); }
         }
         
-        /* ========== ШАПКА ========== */
+        /* ===== ШАПКА ===== */
         .header {
             position: relative;
             z-index: 1;
-            background: rgba(22, 27, 34, 0.85);
-            backdrop-filter: blur(20px) saturate(1.8);
-            padding: 14px 24px;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            background: rgba(8, 12, 22, 0.85);
+            backdrop-filter: blur(24px) saturate(2);
+            padding: 12px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-shrink: 0;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 8px;
         }
+        
         .header-left {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 10px;
         }
+        
         .logo {
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 900;
             background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
             background-size: 300% 300%;
@@ -575,172 +677,197 @@ HTML_TEMPLATE = """
             -webkit-text-fill-color: transparent;
             animation: gradientShift 4s ease-in-out infinite;
         }
+        
         @keyframes gradientShift {
             0%, 100% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
         }
+        
         .badge {
             background: linear-gradient(135deg, #238636, #2ea043);
             color: white;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 600;
-            padding: 3px 12px;
+            padding: 2px 10px;
             border-radius: 20px;
             letter-spacing: 0.5px;
             text-transform: uppercase;
             -webkit-text-fill-color: white;
-            animation: pulse 2s ease-in-out infinite;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.7; transform: scale(0.95); }
-        }
+        
         .status-dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
             background: #2ea043;
+            display: inline-block;
             animation: pulse 1.5s ease-in-out infinite;
-            margin-right: 4px;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.8); }
         }
         
         .menu-buttons {
             display: flex;
-            gap: 6px;
+            gap: 4px;
             flex-wrap: wrap;
         }
+        
         .menu-buttons button {
             background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-            color: #b0b8c4;
-            padding: 5px 14px;
-            border-radius: 20px;
-            font-size: 12px;
+            border: 1px solid rgba(255,255,255,0.05);
+            color: #8b949e;
+            padding: 4px 12px;
+            border-radius: 16px;
+            font-size: 11px;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 0.25s ease;
             font-family: inherit;
         }
+        
         .menu-buttons button:hover {
-            background: rgba(88, 166, 255, 0.15);
-            border-color: rgba(88, 166, 255, 0.3);
+            background: rgba(88, 166, 255, 0.12);
+            border-color: rgba(88, 166, 255, 0.2);
             color: #58a6ff;
             transform: translateY(-1px);
-            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.15);
+            box-shadow: 0 4px 20px rgba(88, 166, 255, 0.08);
         }
+        
         .menu-buttons button.premium-btn:hover {
-            background: rgba(240, 136, 62, 0.15);
-            border-color: rgba(240, 136, 62, 0.3);
+            background: rgba(240, 136, 62, 0.12);
+            border-color: rgba(240, 136, 62, 0.2);
             color: #f0883e;
-            box-shadow: 0 4px 20px rgba(240, 136, 62, 0.15);
         }
+        
         .menu-buttons button.danger-btn:hover {
-            background: rgba(248, 81, 73, 0.15);
-            border-color: rgba(248, 81, 73, 0.3);
+            background: rgba(248, 81, 73, 0.12);
+            border-color: rgba(248, 81, 73, 0.2);
             color: #f85149;
         }
         
-        /* ========== ЧАТ ========== */
+        /* ===== ЧАТ ===== */
         .chat {
             position: relative;
             z-index: 1;
             flex: 1;
             overflow-y: auto;
-            padding: 20px 24px;
+            padding: 16px 20px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
             scroll-behavior: smooth;
         }
-        .chat::-webkit-scrollbar { width: 4px; }
-        .chat::-webkit-scrollbar-track { background: transparent; }
-        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 10px; }
         
-        /* ========== СООБЩЕНИЯ ========== */
+        .chat::-webkit-scrollbar { width: 3px; }
+        .chat::-webkit-scrollbar-track { background: transparent; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+        
+        /* ===== СООБЩЕНИЯ ===== */
         .message {
-            max-width: 80%;
-            padding: 10px 18px;
-            border-radius: 16px;
+            max-width: 82%;
+            padding: 10px 16px;
+            border-radius: 14px;
             line-height: 1.6;
             word-wrap: break-word;
             white-space: pre-wrap;
             font-size: 14px;
-            animation: messageSlide 0.3s ease-out;
+            animation: messageSlide 0.25s ease-out;
             position: relative;
         }
+        
         @keyframes messageSlide {
-            0% { opacity: 0; transform: translateY(8px) scale(0.98); }
+            0% { opacity: 0; transform: translateY(10px) scale(0.97); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
+        
         .user {
             align-self: flex-end;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: white;
-            border-bottom-right-radius: 4px;
-        }
-        .bot {
-            align-self: flex-start;
-            background: rgba(33, 38, 45, 0.9);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-bottom-left-radius: 4px;
-        }
-        .bot a { color: #58a6ff; }
-        .bot strong, .bot b { color: #f0883e; }
-        .message .file-preview {
-            max-width: 250px;
-            max-height: 200px;
-            border-radius: 10px;
-            margin-bottom: 6px;
-            border: 1px solid rgba(255,255,255,0.08);
+            border-bottom-right-radius: 3px;
         }
         
-        /* ========== ВВОД ========== */
+        .bot {
+            align-self: flex-start;
+            background: rgba(22, 27, 34, 0.9);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-bottom-left-radius: 3px;
+        }
+        
+        .bot a { color: #58a6ff; }
+        .bot strong, .bot b { color: #f0883e; }
+        
+        .message img {
+            max-width: 250px;
+            max-height: 200px;
+            border-radius: 8px;
+            margin-bottom: 4px;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        
+        .message .file-info {
+            font-size: 12px;
+            opacity: 0.6;
+            margin-bottom: 4px;
+        }
+        
+        /* ===== ВВОД ===== */
         .input-area {
             position: relative;
             z-index: 1;
-            padding: 12px 20px 16px;
-            border-top: 1px solid rgba(255,255,255,0.05);
-            background: rgba(10, 14, 23, 0.9);
+            padding: 10px 16px 14px;
+            border-top: 1px solid rgba(255,255,255,0.04);
+            background: rgba(8, 12, 22, 0.9);
             backdrop-filter: blur(20px);
             flex-shrink: 0;
         }
+        
         .tools-row {
             display: flex;
-            gap: 6px;
+            gap: 4px;
             flex-wrap: wrap;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
+        
         .tools-row button, .tools-row label {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
-            color: #8b949e;
-            padding: 4px 14px;
-            border-radius: 16px;
-            font-size: 12px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            color: #6e7681;
+            padding: 3px 12px;
+            border-radius: 14px;
+            font-size: 11px;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 0.25s ease;
             font-family: inherit;
         }
+        
         .tools-row button:hover, .tools-row label:hover {
-            background: rgba(255,255,255,0.08);
-            border-color: rgba(255,255,255,0.12);
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.08);
             color: #e6edf3;
         }
+        
         .tools-row input[type="file"] { display: none; }
         
         .input-row {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
         }
+        
         .input-row input {
             flex: 1;
-            padding: 10px 18px;
-            border-radius: 24px;
-            border: 1px solid rgba(255,255,255,0.08);
+            padding: 9px 16px;
+            border-radius: 22px;
+            border: 1px solid rgba(255,255,255,0.06);
             background: rgba(22, 27, 34, 0.8);
             color: #e6edf3;
             font-size: 14px;
@@ -748,152 +875,161 @@ HTML_TEMPLATE = """
             transition: all 0.3s ease;
             font-family: inherit;
         }
+        
         .input-row input:focus {
             border-color: #58a6ff;
-            box-shadow: 0 0 30px rgba(88, 166, 255, 0.08);
+            box-shadow: 0 0 30px rgba(88, 166, 255, 0.05);
         }
+        
         .input-row input::placeholder { color: #484f58; }
+        
         .input-row button {
-            padding: 10px 28px;
-            border-radius: 24px;
+            padding: 9px 24px;
+            border-radius: 22px;
             border: none;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: white;
             font-weight: 600;
             font-size: 14px;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: all 0.25s ease;
             font-family: inherit;
             white-space: nowrap;
         }
+        
         .input-row button:hover {
             transform: scale(1.02);
-            box-shadow: 0 4px 30px rgba(88, 166, 255, 0.25);
-        }
-        .input-row button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
+            box-shadow: 0 4px 25px rgba(88, 166, 255, 0.15);
         }
         
-        /* ========== ПЕЧАТАЕТ ========== */
+        .input-row button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        /* ===== ПЕЧАТАЕТ ===== */
         .typing {
             color: #8b949e;
             font-size: 13px;
             padding: 4px 16px;
             align-self: flex-start;
-            animation: pulse 1.5s ease-in-out infinite;
+            animation: pulse 1.2s ease-in-out infinite;
         }
         
-        /* ========== WELCOME ========== */
+        /* ===== WELCOME ===== */
         .welcome {
             text-align: center;
-            padding: 40px 20px;
+            padding: 30px 20px;
             color: #8b949e;
         }
+        
         .welcome h2 {
             color: #e6edf3;
-            margin-bottom: 6px;
-            font-size: 24px;
+            margin-bottom: 4px;
+            font-size: 22px;
             font-weight: 800;
-        }
-        .welcome p { font-size: 14px; opacity: 0.7; }
-        .welcome .features {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            margin-top: 16px;
-            flex-wrap: wrap;
-        }
-        .welcome .features span {
-            background: rgba(255,255,255,0.04);
-            padding: 6px 16px;
-            border-radius: 20px;
-            font-size: 12px;
-            border: 1px solid rgba(255,255,255,0.05);
+            background: linear-gradient(135deg, #58a6ff, #f0883e);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
         
-        /* ========== АДАПТИВ ========== */
+        .welcome p { font-size: 14px; opacity: 0.6; }
+        
+        .welcome .features {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .welcome .features span {
+            background: rgba(255,255,255,0.03);
+            padding: 4px 14px;
+            border-radius: 16px;
+            font-size: 11px;
+            border: 1px solid rgba(255,255,255,0.04);
+            color: #6e7681;
+        }
+        
+        /* ===== АДАПТИВ ===== */
         @media (max-width: 640px) {
-            .header { padding: 10px 14px; }
-            .logo { font-size: 17px; }
-            .menu-buttons button { font-size: 10px; padding: 3px 10px; }
-            .message { max-width: 92%; font-size: 13px; padding: 8px 14px; }
-            .chat { padding: 12px 14px; }
-            .input-area { padding: 10px 14px; }
+            .header { padding: 8px 12px; }
+            .logo { font-size: 16px; }
+            .menu-buttons button { font-size: 9px; padding: 3px 8px; }
+            .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
+            .chat { padding: 10px 12px; }
+            .input-area { padding: 8px 12px 12px; }
             .input-row input { font-size: 13px; padding: 8px 14px; }
-            .input-row button { padding: 8px 18px; font-size: 13px; }
-            .tools-row button, .tools-row label { font-size: 10px; padding: 3px 10px; }
+            .input-row button { padding: 8px 16px; font-size: 13px; }
+            .tools-row button, .tools-row label { font-size: 10px; padding: 2px 10px; }
             .welcome h2 { font-size: 18px; }
-            .welcome .features { gap: 8px; }
-            .welcome .features span { font-size: 10px; padding: 4px 10px; }
+            .welcome .features span { font-size: 10px; padding: 3px 10px; }
         }
     </style>
 </head>
 <body>
-    <!-- ===== АНИМИРОВАННЫЙ ФОН ===== -->
     <canvas id="particles-canvas"></canvas>
     <div class="glow glow-1"></div>
     <div class="glow glow-2"></div>
     <div class="glow glow-3"></div>
     
-    <!-- ===== ШАПКА ===== -->
     <header class="header">
         <div class="header-left">
             <span class="logo">🧠 AWESOME AI</span>
-            <span class="badge"><span class="status-dot"></span> В сети</span>
+            <span class="badge"><span class="status-dot"></span> ONLINE</span>
         </div>
         <div class="menu-buttons">
-            <button onclick="sendCommand('/status')">📊 Статус</button>
-            <button class="premium-btn" onclick="sendCommand('/premium')">💎 Premium</button>
-            <button onclick="sendCommand('/test')">🎁 Тест</button>
-            <button onclick="sendCommand('/profile')">👤 Профиль</button>
-            <button onclick="sendCommand('/help')">❓ Помощь</button>
-            <button class="danger-btn" onclick="clearChat()">🧹 Очистить</button>
+            <button onclick="sendCommand('/status')">📊</button>
+            <button class="premium-btn" onclick="sendCommand('/premium')">💎</button>
+            <button onclick="sendCommand('/test')">🎁</button>
+            <button onclick="sendCommand('/profile')">👤</button>
+            <button onclick="sendCommand('/help')">❓</button>
+            <button class="danger-btn" onclick="clearChat()">🧹</button>
         </div>
     </header>
     
-    <!-- ===== ЧАТ ===== -->
     <div class="chat" id="chat">
         <div class="welcome">
-            <h2>✨ AWESOME AI — лучшая нейросеть!</h2>
-            <p>Спрашивай что угодно — я отвечу, решу, поищу в интернете.</p>
+            <h2>✨ AWESOME AI</h2>
+            <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
             <div class="features">
                 <span>📸 Фото</span>
-                <span>🎥 Видео</span>
                 <span>🎤 Голос</span>
                 <span>🌐 Поиск</span>
                 <span>💵 Курсы</span>
                 <span>🧮 Математика</span>
+                <span>🎨 Рисование</span>
             </div>
         </div>
     </div>
     
-    <!-- ===== ВВОД ===== -->
     <div class="input-area">
         <div class="tools-row">
-            <label for="fileInput">📎 Прикрепить</label>
-            <input type="file" id="fileInput" accept="image/*,video/*,audio/*,application/pdf" multiple onchange="handleFiles(this.files)">
-            <button onclick="document.getElementById('fileInput').click()">📸 Фото/Видео</button>
-            <button onclick="startRecording()">🎤 Голос</button>
-            <button onclick="sendCommand('/draw ' + prompt('🎨 Что нарисовать?'))">🎨 Рисовать</button>
-            <button onclick="sendCommand('/weather ' + prompt('🌤 Город?'))">🌤 Погода</button>
+            <label for="fileInput">📎</label>
+            <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
+            <button onclick="document.getElementById('fileInput').click()">📸</button>
+            <button onclick="startRecording()">🎤</button>
+            <button onclick="sendCommand('/draw ' + prompt('🎨 Что нарисовать?'))">🎨</button>
+            <button onclick="sendCommand('/weather ' + prompt('🌤 Город?'))">🌤</button>
+            <button onclick="sendCommand('/exchange')">💵</button>
+            <button onclick="sendCommand('/crypto')">🪙</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши свой вопрос..." onkeydown="if(event.key==='Enter') send()" autofocus>
-            <button id="sendBtn" onclick="send()">🚀 Отправить</button>
+            <input id="input" placeholder="Напиши..." onkeydown="if(event.key==='Enter') send()" autofocus>
+            <button id="sendBtn" onclick="send()">➤</button>
         </div>
     </div>
     
     <script>
-        // ============================================================
-        // ЧАСТИЦЫ НА ФОНЕ
-        // ============================================================
+        // ===== ЧАСТИЦЫ =====
         (function() {
             const canvas = document.getElementById('particles-canvas');
             const ctx = canvas.getContext('2d');
             let particles = [];
-            const count = 80;
+            const count = 60;
             
             function resize() {
                 canvas.width = window.innerWidth;
@@ -906,10 +1042,10 @@ HTML_TEMPLATE = """
                 constructor() {
                     this.x = Math.random() * canvas.width;
                     this.y = Math.random() * canvas.height;
-                    this.size = Math.random() * 3 + 1;
-                    this.speedX = (Math.random() - 0.5) * 0.5;
-                    this.speedY = (Math.random() - 0.5) * 0.5;
-                    this.opacity = Math.random() * 0.5 + 0.2;
+                    this.size = Math.random() * 2.5 + 0.5;
+                    this.speedX = (Math.random() - 0.5) * 0.4;
+                    this.speedY = (Math.random() - 0.5) * 0.4;
+                    this.opacity = Math.random() * 0.3 + 0.1;
                 }
                 update() {
                     this.x += this.speedX;
@@ -920,24 +1056,26 @@ HTML_TEMPLATE = """
                 draw() {
                     ctx.beginPath();
                     ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                    ctx.fillStyle = `rgba(136, 192, 255, ${this.opacity})`;
+                    ctx.fillStyle = `rgba(100, 150, 255, ${this.opacity})`;
                     ctx.fill();
                 }
             }
             
-            for (let i = 0; i < count; i++) {
-                particles.push(new Particle());
-            }
+            for (let i = 0; i < count; i++) particles.push(new Particle());
             
-            function connectParticles() {
+            function animate() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                particles.forEach(p => { p.update(); p.draw(); });
+                
+                // Линии
                 for (let i = 0; i < particles.length; i++) {
                     for (let j = i + 1; j < particles.length; j++) {
                         const dx = particles[i].x - particles[j].x;
                         const dy = particles[i].y - particles[j].y;
                         const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist < 150) {
+                        if (dist < 120) {
                             ctx.beginPath();
-                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.08 * (1 - dist / 150)})`;
+                            ctx.strokeStyle = `rgba(100, 150, 255, ${0.04 * (1 - dist / 120)})`;
                             ctx.lineWidth = 0.5;
                             ctx.moveTo(particles[i].x, particles[i].y);
                             ctx.lineTo(particles[j].x, particles[j].y);
@@ -945,33 +1083,25 @@ HTML_TEMPLATE = """
                         }
                     }
                 }
-            }
-            
-            function animate() {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                particles.forEach(p => { p.update(); p.draw(); });
-                connectParticles();
                 requestAnimationFrame(animate);
             }
             animate();
         })();
         
-        // ============================================================
-        // ЛОГИКА ЧАТА
-        // ============================================================
+        // ===== ЛОГИКА ЧАТА =====
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         let filesToSend = [];
         let userId = Date.now();
         
-        function addMessage(text, isUser, filePreview = null) {
-            // Убираем welcome если есть
+        function addMessage(text, isUser, filePreview = null, isImage = false) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
             
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
+            
             if (filePreview) {
                 const img = document.createElement('img');
                 img.src = filePreview;
@@ -979,8 +1109,14 @@ HTML_TEMPLATE = """
                 div.appendChild(img);
                 div.appendChild(document.createElement('br'));
             }
-            const textNode = document.createTextNode(text);
-            div.appendChild(textNode);
+            
+            // Обработка markdown
+            let formattedText = text;
+            formattedText = formattedText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            formattedText = formattedText.replace(/\*(.*?)\*/g, '<em>$1</em>');
+            formattedText = formattedText.replace(/\n/g, '<br>');
+            
+            div.innerHTML = formattedText;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
         }
@@ -991,7 +1127,7 @@ HTML_TEMPLATE = """
             if (show) {
                 const div = document.createElement('div');
                 div.className = 'typing';
-                div.textContent = '🧠 AWESOME AI печатает';
+                div.textContent = '🧠 AWESOME AI печатает...';
                 chat.appendChild(div);
                 chat.scrollTop = chat.scrollHeight;
             }
@@ -1000,7 +1136,6 @@ HTML_TEMPLATE = """
         async function send() {
             const text = input.value.trim();
             if (!text && filesToSend.length === 0) return;
-            const msgText = text || (filesToSend.length > 0 ? '📎 [вложение]' : '');
             input.value = '';
             sendBtn.disabled = true;
             setTyping(true);
@@ -1008,27 +1143,18 @@ HTML_TEMPLATE = """
             const formData = new FormData();
             formData.append('message', text || '');
             formData.append('user_id', userId);
-            
-            for (const file of filesToSend) {
-                formData.append('files', file);
-            }
+            for (const file of filesToSend) formData.append('files', file);
             filesToSend = [];
             
             try {
-                const response = await fetch('/api/chat_full', {
-                    method: 'POST',
-                    body: formData
-                });
+                const response = await fetch('/api/chat_full', { method: 'POST', body: formData });
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) {
-                    addMessage('⚠️ ' + data.error, false);
-                } else if (data.reply) {
-                    addMessage(data.reply, false);
-                }
+                if (data.error) addMessage('⚠️ ' + data.error, false);
+                else if (data.reply) addMessage(data.reply, false);
             } catch (e) {
                 setTyping(false);
-                addMessage('⚠️ Ошибка соединения с сервером', false);
+                addMessage('⚠️ Ошибка соединения', false);
             }
             sendBtn.disabled = false;
             input.focus();
@@ -1057,26 +1183,26 @@ HTML_TEMPLATE = """
         function clearChat() {
             chat.innerHTML = `
                 <div class="welcome">
-                    <h2>✨ AWESOME AI — лучшая нейросеть!</h2>
-                    <p>Спрашивай что угодно — я отвечу, решу, поищу в интернете.</p>
+                    <h2>✨ AWESOME AI</h2>
+                    <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
                     <div class="features">
                         <span>📸 Фото</span>
-                        <span>🎥 Видео</span>
                         <span>🎤 Голос</span>
                         <span>🌐 Поиск</span>
                         <span>💵 Курсы</span>
                         <span>🧮 Математика</span>
+                        <span>🎨 Рисование</span>
                     </div>
                 </div>
             `;
         }
         
         function startRecording() {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                addMessage('🎤 Голосовой ввод не поддерживается в этом браузере', false);
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                addMessage('🎤 Голосовой ввод не поддерживается', false);
                 return;
             }
-            addMessage('🎤 Запись голоса... Говорите', true);
+            addMessage('🎤 Запись... Говорите', true);
             const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
             recognition.lang = 'ru-RU';
             recognition.onresult = function(event) {
@@ -1091,41 +1217,18 @@ HTML_TEMPLATE = """
             recognition.start();
         }
         
-        // Enter для отправки
-        document.addEventListener('DOMContentLoaded', function() {
-            input.focus();
-        });
+        document.addEventListener('DOMContentLoaded', () => input.focus());
     </script>
 </body>
 </html>
 """
 
 # ============================================================
-# ВЕБ-ЭНДПОИНТЫ
+# ЭНДПОИНТЫ
 # ============================================================
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    try:
-        data = request.json
-        message = data.get('message', '')
-        user_id = data.get('user_id', 1)
-        
-        if not message:
-            return jsonify({'error': 'Напиши что-нибудь!'})
-        
-        if not YANDEX_API_KEY:
-            return jsonify({'error': '❌ API ключ не настроен!'})
-        
-        ensure_user(user_id, f"user_{user_id}")
-        response = process_message(user_id, message)
-        return jsonify({'reply': response})
-    except Exception as e:
-        print(f"Ошибка: {e}")
-        return jsonify({'error': str(e)})
 
 @app.route('/api/chat_full', methods=['POST'])
 def chat_full():
@@ -1136,9 +1239,6 @@ def chat_full():
         
         if not message and not files:
             return jsonify({'error': 'Напиши что-нибудь или прикрепи файл!'})
-        
-        if not YANDEX_API_KEY:
-            return jsonify({'error': '❌ API ключ не настроен!'})
         
         ensure_user(user_id, f"user_{user_id}")
         
@@ -1160,18 +1260,10 @@ def chat_full():
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok', 'api_key_set': bool(YANDEX_API_KEY)})
+    return jsonify({'status': 'ok'})
 
-# ============================================================
-# ЗАПУСК
-# ============================================================
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
-    print("=" * 60)
-    print("🧠 AWESOME AI — ВЕБ-ВЕРСИЯ (МЕГА-КРАСИВАЯ)")
-    print("=" * 60)
-    print(f"🔑 API ключ: {'✅ НАЙДЕН' if YANDEX_API_KEY else '❌ НЕ НАЙДЕН'}")
-    print(f"📁 Folder ID: {FOLDER_ID}")
+    print("🧠 AWESOME AI — МЕГА-ОБНОВЛЕНИЕ!")
     print(f"🌐 http://localhost:{port}")
-    print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
