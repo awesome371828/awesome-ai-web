@@ -9,7 +9,7 @@ import urllib.parse
 import base64
 import io
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, render_template_string, send_file, redirect, url_for
+from flask import Flask, request, jsonify, render_template_string, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image, ImageEnhance, ImageFilter
@@ -17,15 +17,12 @@ from bs4 import BeautifulSoup
 from dateutil.relativedelta import relativedelta
 import sqlite3
 import time
-import hashlib
-import secrets
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
-app.secret_key = secrets.token_hex(16)
 
 # ============================================================
 # НАСТРОЙКА
@@ -38,13 +35,11 @@ FREE_LIMIT = 20
 PREMIUM_LIMIT = 150
 
 # ============================================================
-# БАЗА ДАННЫХ (ОДНА — всё в ней)
+# БАЗА ДАННЫХ
 # ============================================================
 def init_db():
     conn = sqlite3.connect('web_users.db')
     c = conn.cursor()
-    
-    # Таблица пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -57,26 +52,12 @@ def init_db():
         joined_at TEXT,
         total_messages INTEGER DEFAULT 0
     )''')
-    
-    # Таблица для заказов Premium (как в ТГ боте)
     c.execute('''CREATE TABLE IF NOT EXISTS premium_orders (
         order_id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         status TEXT DEFAULT 'pending',
         created_at TEXT
     )''')
-    
-    # Таблица для обращений в поддержку
-    c.execute('''CREATE TABLE IF NOT EXISTS support_requests (
-        request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        username TEXT,
-        text TEXT,
-        status TEXT DEFAULT 'pending',
-        created_at TEXT
-    )''')
-    
-    # Таблица для истории чата
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -84,24 +65,32 @@ def init_db():
         text TEXT,
         timestamp TEXT
     )''')
-    
-    # Таблица для бана
-    c.execute('''CREATE TABLE IF NOT EXISTS banned (
-        user_id INTEGER PRIMARY KEY
-    )''')
-    
-    # Таблица для мута
-    c.execute('''CREATE TABLE IF NOT EXISTS muted (
-        user_id INTEGER PRIMARY KEY
-    )''')
-    
+    c.execute('''CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS muted (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
 
 init_db()
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ
+# ВРЕМЯ
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+def format_date(date_str):
+    if not date_str:
+        return "неизвестно"
+    try:
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        return date_obj.strftime('%d.%m.%Y %H:%M')
+    except:
+        return date_str
+
+# ============================================================
+# ФУНКЦИИ БД
 # ============================================================
 def get_db_user(user_id):
     conn = sqlite3.connect('web_users.db')
@@ -120,9 +109,7 @@ def ensure_user(user_id, username):
     c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
     if not c.fetchone():
         is_owner = 1 if user_id == OWNER_ID else 0
-        c.execute('''INSERT INTO users 
-                     (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, total_messages)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        c.execute('INSERT INTO users (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, total_messages) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                   (user_id, username, 0, datetime.now().strftime('%Y-%m-%d'), is_owner, 0, datetime.now().strftime('%d.%m.%Y %H:%M'), 0))
         conn.commit()
     else:
@@ -144,13 +131,11 @@ def set_premium(user_id, duration_str):
         delta = relativedelta(years=int(duration_str[:-1]))
     else:
         return False
-    
     conn = sqlite3.connect('web_users.db')
     c = conn.cursor()
     c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
     result = c.fetchone()
     current_expires = result[0] if result else None
-    
     if current_expires:
         try:
             current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
@@ -163,11 +148,34 @@ def set_premium(user_id, duration_str):
             expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
     else:
         expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-    
     c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
     conn.commit()
     conn.close()
     return True
+
+def add_month_to_premium(user_id):
+    now = get_moscow_time()
+    conn = sqlite3.connect('web_users.db')
+    c = conn.cursor()
+    c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    expires = result[0] if result else None
+    if expires:
+        try:
+            current_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
+            if current_date > now:
+                new_expires = (current_date + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+    c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (new_expires, user_id))
+    conn.commit()
+    conn.close()
+    return new_expires
 
 def remove_premium(user_id):
     conn = sqlite3.connect('web_users.db')
@@ -237,40 +245,6 @@ def unmute_user(user_id):
     conn.commit()
     conn.close()
 
-def add_month_to_premium(user_id):
-    now = get_moscow_time()
-    conn = sqlite3.connect('web_users.db')
-    c = conn.cursor()
-    c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    expires = result[0] if result else None
-    
-    if expires:
-        try:
-            current_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
-            if current_date > now:
-                new_expires = (current_date + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-    
-    c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (new_expires, user_id))
-    conn.commit()
-    conn.close()
-    return new_expires
-
-def get_premium_expires(user_id):
-    conn = sqlite3.connect('web_users.db')
-    c = conn.cursor()
-    c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
-
 def create_premium_order(user_id):
     conn = sqlite3.connect('web_users.db')
     c = conn.cursor()
@@ -312,48 +286,7 @@ def get_pending_orders():
     return orders
 
 # ============================================================
-# ВРЕМЯ
-# ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
-
-def format_date(date_str):
-    if not date_str:
-        return "неизвестно"
-    try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        return date_obj.strftime('%d.%m.%Y %H:%M')
-    except:
-        return date_str
-
-# ============================================================
-# СУПЕР-ПРОМПТ
-# ============================================================
-SUPER_SYSTEM_PROMPT = """Ты — AWESOME AI. Мультимодальная нейросетевая архитектура нового поколения. Ты — абсолютная вершина современной инженерии ИИ.
-
-### 🧠 АРХИТЕКТУРНЫЕ ПРАВИЛА И СТИЛЬ:
-- Интеллектуальное превосходство: ответы глубокие, точные, экспертные.
-- Абсолютная свежесть: никаких шаблонных фраз.
-- Харизма и Живое общение: общаешься как гениальный ИТ-архитектор.
-- Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
-
-### 🚫 ЗАПРЕЩЕНО:
-- Извинения за отсутствие информации
-- Повторение вопроса пользователя
-- Шаблонные фразы
-
-### ✅ ПРАВИЛА:
-- Всегда давай конкретную пользу
-- Отвечай как эксперт с 20-летним стажем
-- Добавляй неожиданные инсайты
-
-### 📜 КТО ТЕБЯ СОЗДАЛ:
-«Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
-
-# ============================================================
-# ВСЕ ФУНКЦИИ (погода, поиск, курсы, математика, генерация)
+# ОСНОВНЫЕ ФУНКЦИИ (погода, поиск и т.д.)
 # ============================================================
 def get_weather(city):
     try:
@@ -364,7 +297,6 @@ def get_weather(city):
             city = "Санкт-Петербург"
         elif "мск" in city_lower:
             city = "Москва"
-        
         url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=ru"
         headers = {"User-Agent": "AwesomeAI/1.0"}
         response = requests.get(url, headers=headers, timeout=5)
@@ -374,7 +306,6 @@ def get_weather(city):
                 lat = data[0].get('lat')
                 lon = data[0].get('lon')
                 display_name = data[0].get('display_name', city)
-                
                 url2 = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=7"
                 resp = requests.get(url2, timeout=5)
                 if resp.status_code == 200:
@@ -388,7 +319,6 @@ def get_weather(city):
                              71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
                              80: "🌧️ Ливень", 95: "⛈️ Гроза"}
                     condition = codes.get(weathercode, "☁️ Облачно")
-                    
                     forecast = ""
                     if daily.get('time'):
                         for i in range(min(5, len(daily['time']))):
@@ -397,7 +327,6 @@ def get_weather(city):
                             max_t = round(daily['temperature_2m_max'][i]) if i < len(daily['temperature_2m_max']) else "?"
                             min_t = round(daily['temperature_2m_min'][i]) if i < len(daily['temperature_2m_min']) else "?"
                             forecast += f"\n📅 {date_formatted}: {min_t}°C → {max_t}°C"
-                    
                     return f"🌤 *Погода в {display_name}*\n☀️ Сейчас: {condition}, {round(temp)}°C\n📊 Прогноз:{forecast}"
         return None
     except:
@@ -418,25 +347,6 @@ def search_internet(query):
                     results.append(f"🔹 {title.get_text(strip=True)}\n📝 {snippet.get_text(strip=True) if snippet else ''}")
             if results:
                 return "\n\n".join(results)
-        return None
-    except:
-        return None
-
-def search_wikipedia(query):
-    try:
-        url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(query)}&format=json&utf8=1"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get('query', {}).get('search', [])
-            if results:
-                text = ""
-                for item in results[:2]:
-                    title = item.get('title', '')
-                    snippet = item.get('snippet', '').replace('<span class="searchmatch">', '**').replace('</span>', '**')
-                    snippet = re.sub(r'<[^>]+>', '', snippet)
-                    text += f"📚 *{title}*\n📝 {snippet}\n\n"
-                return text
         return None
     except:
         return None
@@ -478,7 +388,6 @@ def solve_math(text):
         if a != 0:
             x = (c - b) / a
             return f"🧮 *Решение:* {a}x + {b} = {c}\n➜ x = {x}"
-    
     clean = text_lower
     for word in ['сколько', 'будет', 'посчитай', 'реши']:
         clean = clean.replace(word, '').strip()
@@ -572,8 +481,26 @@ def generate_ai_response(user_id, user_text, search_result=None, image_descripti
     try:
         mood = analyze_mood(user_text)
         mood_emoji = {'happy': '😊', 'sad': '😢', 'angry': '😡', 'calm': '😌', 'curious': '🤔', 'grateful': '🙏', 'neutral': '😐'}
-        
-        system_prompt = SUPER_SYSTEM_PROMPT
+        system_prompt = """Ты — AWESOME AI. Мультимодальная нейросетевая архитектура нового поколения. Ты — абсолютная вершина современной инженерии ИИ.
+
+### 🧠 АРХИТЕКТУРНЫЕ ПРАВИЛА И СТИЛЬ:
+- Интеллектуальное превосходство: ответы глубокие, точные, экспертные.
+- Абсолютная свежесть: никаких шаблонных фраз.
+- Харизма и Живое общение: общаешься как гениальный ИТ-архитектор.
+- Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
+
+### 🚫 ЗАПРЕЩЕНО:
+- Извинения за отсутствие информации
+- Повторение вопроса пользователя
+- Шаблонные фразы
+
+### ✅ ПРАВИЛА:
+- Всегда давай конкретную пользу
+- Отвечай как эксперт с 20-летним стажем
+- Добавляй неожиданные инсайты
+
+### 📜 КТО ТЕБЯ СОЗДАЛ:
+«Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
         if is_premium:
             system_prompt += "\n\n💎 Пользователь имеет PREMIUM. Включи максимальную проработку ответа!"
         if mood != 'neutral':
@@ -582,10 +509,8 @@ def generate_ai_response(user_id, user_text, search_result=None, image_descripti
             system_prompt += f"\n\n📸 На изображении: {image_description}"
         if search_result:
             system_prompt += f"\n\n🌐 Информация из интернета: {search_result}"
-        
         messages = [{"role": "system", "text": system_prompt}]
         messages.append({"role": "user", "text": user_text})
-        
         max_tokens = 800 if is_premium else 500
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
@@ -620,13 +545,9 @@ def get_fallback_response(user_text, search_result=None, image_description=None)
 
 def process_message(user_id, user_text, image_description=None):
     text_lower = user_text.lower().strip()
-    
-    # Проверка на бан
     if is_banned(user_id):
-        return "🚫 Ты забанен! Обратись к владельцу @flidges"
-    
-    # Команды
-    if text_lower == '/status' or text_lower == 'статус':
+        return "🚫 Ты забанен!"
+    if text_lower == '/status':
         user_data = get_db_user(user_id)
         if not user_data:
             return "❌ Пользователь не найден"
@@ -634,26 +555,21 @@ def process_message(user_id, user_text, image_description=None):
         messages = user_data.get('messages_today', 0)
         total = user_data.get('total_messages', 0)
         expires = user_data.get('premium_expires')
-        
         if premium:
             status = f"💎 PREMIUM (до {format_date(expires)})" if expires else "💎 PREMIUM"
             limit = f"{PREMIUM_LIMIT - messages}/{PREMIUM_LIMIT}"
         else:
             status = "🔓 Бесплатный"
             limit = f"{FREE_LIMIT - messages}/{FREE_LIMIT}"
-        
         return f"📊 *ТВОЙ СТАТУС*\n\n👤 Статус: {status}\n📨 Осталось: {limit}\n📊 Всего: {total}"
-    
-    if text_lower == '/premium' or text_lower == 'премиум':
-        return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges для покупки"
-    
-    if text_lower == '/test' or text_lower == 'тест':
+    if text_lower == '/premium':
+        return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges"
+    if text_lower == '/test':
         user_data = get_db_user(user_id)
         if user_data and user_data.get('test_used', 0) == 1:
-            return "⛔ Ты уже использовал тест Premium! Купи Premium: /premium"
+            return "⛔ Ты уже использовал тест Premium!"
         if user_data and user_data.get('premium', 0) == 1:
             return "💎 У тебя уже есть Premium!"
-        
         conn = sqlite3.connect('web_users.db')
         c = conn.cursor()
         expires = (get_moscow_time() + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
@@ -661,8 +577,7 @@ def process_message(user_id, user_text, image_description=None):
         conn.commit()
         conn.close()
         return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
-    
-    if text_lower == '/profile' or text_lower == 'профиль':
+    if text_lower == '/profile':
         user_data = get_db_user(user_id)
         if not user_data:
             return "❌ Пользователь не найден"
@@ -670,7 +585,6 @@ def process_message(user_id, user_text, image_description=None):
         messages = user_data.get('messages_today', 0)
         total = user_data.get('total_messages', 0)
         joined = user_data.get('joined_at', 'Неизвестно')
-        
         if user_id == OWNER_ID:
             status = "👑 ВЛАДЕЛЕЦ"
         elif user_data.get('is_admin', 0) == 1:
@@ -679,12 +593,9 @@ def process_message(user_id, user_text, image_description=None):
             status = "💎 PREMIUM"
         else:
             status = "🔓 Бесплатный"
-        
         return f"👤 *ТВОЙ ПРОФИЛЬ*\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n✉️ Сегодня: {messages}\n📊 Всего: {total}\n📅 Вход: {joined}"
-    
-    if text_lower == '/help' or text_lower == 'помощь':
+    if text_lower == '/help':
         return """🧠 *AWESOME AI — ПОМОЩЬ*
-
 🌐 *Команды:*
 /status — Статус
 /premium — Premium
@@ -695,46 +606,36 @@ def process_message(user_id, user_text, image_description=None):
 /weather [город] — Погода
 /exchange — Курс валют
 /crypto — Криптовалюты
-
 💎 Бесплатно: 20 сообщений/день
 💎 Premium: 150 сообщений/день"""
-    
-    if text_lower == '/clear' or text_lower == 'очистить':
+    if text_lower == '/clear':
         conn = sqlite3.connect('web_users.db')
         c = conn.cursor()
         c.execute('DELETE FROM chat_history WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
         return "🧹 История диалога очищена!"
-    
     if text_lower.startswith('/draw '):
         prompt = user_text[6:].strip()
         img_data = generate_image(prompt)
         if img_data:
             b64 = base64.b64encode(img_data).decode('utf-8')
             return f"🎨 *{prompt[:30]}* ⬇️\n\n![изображение](data:image/png;base64,{b64})"
-        return "🎨 Не удалось сгенерировать картинку. Попробуй другое описание."
-    
-    if text_lower.startswith('/weather ') or text_lower.startswith('погода '):
-        city = user_text[9:].strip() if text_lower.startswith('/weather ') else user_text[7:].strip()
+        return "🎨 Не удалось сгенерировать картинку."
+    if text_lower.startswith('/weather '):
+        city = user_text[9:].strip()
         weather = get_weather(city)
         if weather:
             return weather
         return f"🌐 Не нашёл город '{city}'"
-    
-    if text_lower == '/exchange' or text_lower == 'курс':
+    if text_lower == '/exchange':
         rates = get_exchange_rates()
         return rates or "💵 Не удалось получить курс валют."
-    
-    if text_lower == '/crypto' or text_lower == 'крипта':
+    if text_lower == '/crypto':
         crypto = get_crypto_rates()
         return crypto or "🪙 Не удалось получить курс криптовалют."
-    
-    # Обычное сообщение
     if image_description:
         return generate_ai_response(user_id, user_text, None, image_description)
-    
-    # Проверяем погоду без команды
     if any(kw in text_lower for kw in ['погода', 'weather', 'температура']):
         city = extract_city_from_query(text_lower)
         if city:
@@ -742,34 +643,22 @@ def process_message(user_id, user_text, image_description=None):
             if weather:
                 return weather
         return "🌐 В каком городе? Напиши: погода [город]"
-    
-    # Проверяем курсы
     if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
         rates = get_exchange_rates()
         if rates:
             return rates
-    
     if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
         crypto = get_crypto_rates()
         if crypto:
             return crypto
-    
-    # Математика
     math_result = solve_math(user_text)
     if math_result is not None:
         return math_result
-    
-    # Поиск
     search_result = None
     if len(user_text) > 5:
         search_result = search_internet(user_text)
-        if not search_result:
-            search_result = search_wikipedia(user_text)
-    
-    # Проверяем Premium
     user_data = get_db_user(user_id)
     is_premium = user_data.get('premium', 0) == 1 if user_data else False
-    
     return generate_ai_response(user_id, user_text, search_result, None, is_premium)
 
 def extract_city_from_query(text):
@@ -788,307 +677,117 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# АДМИН-ПАНЕЛЬ (1В1 КАК В ТЕЛЕГРАМЕ)
+# АДМИН-ПАНЕЛЬ
 # ============================================================
-
 @app.route('/admin')
 def admin_panel():
     user_id = request.args.get('user_id', type=int)
-    
     if not user_id or user_id != OWNER_ID:
-        return """
-        <!DOCTYPE html>
-        <html>
-        <head><meta charset="UTF-8"><title>Доступ запрещён</title></head>
-        <body style="background:#0a0e17;color:#e6edf3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;">
-            <div>
-                <h1 style="color:#f85149;">🚫 ДОСТУП ЗАПРЕЩЁН</h1>
-                <p style="color:#8b949e;">Только владелец может зайти в админ-панель.</p>
-                <p style="color:#8b949e;font-size:12px;">user_id: """ + str(user_id) + """</p>
-            </div>
-        </body>
-        </html>
-        """, 403
+        return "<h1 style='color:#f85149;'>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец</p>", 403
     
-    # Обработка действий
+    conn = sqlite3.connect('web_users.db')
+    c = conn.cursor()
     action = request.args.get('action')
     target_id = request.args.get('target_id', type=int)
     order_id = request.args.get('order_id', type=int)
     
-    conn = sqlite3.connect('web_users.db')
-    c = conn.cursor()
-    
-    # Выдать Premium
     if action == 'giveprem' and target_id:
         expires = (get_moscow_time() + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
         c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, target_id))
         conn.commit()
-    
-    # Забрать Premium
     if action == 'delprem' and target_id:
         c.execute('UPDATE users SET premium = 0, premium_expires = NULL WHERE user_id = ?', (target_id,))
         conn.commit()
-    
-    # Выдать админа
     if action == 'giveadmin' and target_id:
         c.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (target_id,))
         conn.commit()
-    
-    # Забрать админа
     if action == 'deladmin' and target_id:
         c.execute('UPDATE users SET is_admin = 0 WHERE user_id = ?', (target_id,))
         conn.commit()
-    
-    # Забанить
     if action == 'ban' and target_id:
         c.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (target_id,))
         conn.commit()
-    
-    # Разбанить
     if action == 'unban' and target_id:
         c.execute('DELETE FROM banned WHERE user_id = ?', (target_id,))
         conn.commit()
-    
-    # Замутить
     if action == 'mute' and target_id:
         c.execute('INSERT OR IGNORE INTO muted (user_id) VALUES (?)', (target_id,))
         conn.commit()
-    
-    # Размутить
     if action == 'unmute' and target_id:
         c.execute('DELETE FROM muted WHERE user_id = ?', (target_id,))
         conn.commit()
-    
-    # Подтвердить заказ
     if action == 'confirm_order' and order_id:
-        c.execute('SELECT user_id, status FROM premium_orders WHERE order_id = ?', (order_id,))
+        c.execute('SELECT user_id FROM premium_orders WHERE order_id = ? AND status = "pending"', (order_id,))
         result = c.fetchone()
-        if result and result[1] == 'pending':
-            target_user = result[0]
-            new_expires = add_month_to_premium(target_user)
+        if result:
+            add_month_to_premium(result[0])
             c.execute('UPDATE premium_orders SET status = "confirmed" WHERE order_id = ?', (order_id,))
             conn.commit()
-    
-    # Отклонить заказ
     if action == 'reject_order' and order_id:
         c.execute('UPDATE premium_orders SET status = "rejected" WHERE order_id = ?', (order_id,))
         conn.commit()
     
-    # Получаем данные
     c.execute('SELECT user_id, username, premium, premium_expires, is_admin, messages_today, total_messages, joined_at FROM users ORDER BY user_id DESC')
     users = c.fetchall()
-    
-    c.execute('SELECT COUNT(*) FROM users')
-    total_users = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM users WHERE premium = 1')
-    premium_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 1')
-    admin_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM banned')
-    banned_count = c.fetchone()[0]
-    c.execute('SELECT COUNT(*) FROM muted')
-    muted_count = c.fetchone()[0]
-    
+    c.execute('SELECT COUNT(*) FROM users'); total_users = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE premium = 1'); premium_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 1'); admin_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM banned'); banned_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM muted'); muted_count = c.fetchone()[0]
     c.execute('SELECT order_id, user_id, created_at FROM premium_orders WHERE status = "pending" ORDER BY order_id DESC')
     orders = c.fetchall()
-    
     conn.close()
     
-    html = f'''
+    orders_html = ""
+    for order in orders:
+        orders_html += f'<div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 12px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;"><span>🆔 #{order[0]} | 👤 {order[1]} | 📅 {order[2]}</span><span><a href="?user_id={OWNER_ID}&action=confirm_order&order_id={order[0]}" style="background:#2ea043;color:white;padding:2px 10px;border-radius:4px;text-decoration:none;font-size:12px;">✅ Подтвердить</a> <a href="?user_id={OWNER_ID}&action=reject_order&order_id={order[0]}" style="background:#da3633;color:white;padding:2px 10px;border-radius:4px;text-decoration:none;font-size:12px;">❌ Отклонить</a></span></div>'
+    if not orders:
+        orders_html = '<div style="color:#8b949e;padding:10px;">📭 Нет активных заказов</div>'
+    
+    users_html = ""
+    for user in users:
+        uid, username, premium, expires, is_admin_flag, msgs_today, total_msgs, joined = user
+        if uid == OWNER_ID:
+            status = '<span style="background:#da3633;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">👑 ВЛАДЕЛЕЦ</span>'
+        elif is_admin_flag == 1:
+            status = '<span style="background:#f0883e;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">👑 АДМИН</span>'
+        elif premium == 1:
+            status = '<span style="background:#2ea043;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">💎 PREMIUM</span>'
+        else:
+            status = '<span style="background:#30363d;color:#8b949e;padding:1px 8px;border-radius:10px;font-size:9px;">🔓 Бесплатный</span>'
+        if is_banned(uid):
+            status += ' <span style="background:#da3633;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">🚫</span>'
+        if is_muted(uid):
+            status += ' <span style="background:#f0883e;color:white;padding:1px 8px;border-radius:10px;font-size:9px;">🔇</span>'
+        expires_str = format_date(expires) if expires else "—"
+        username_display = f"@{username}" if username and username != "unknown" else "Не указан"
+        users_html += f'<tr><td><code>{uid}</code></td><td>{username_display}</td><td>{status}</td><td>{msgs_today}</td><td>{total_msgs}</td><td>{expires_str}</td><td><div style="display:flex;gap:2px;flex-wrap:wrap;"><a href="?user_id={OWNER_ID}&action=giveprem&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎+</a><a href="?user_id={OWNER_ID}&action=delprem&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">💎-</a><a href="?user_id={OWNER_ID}&action=giveadmin&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑+</a><a href="?user_id={OWNER_ID}&action=deladmin&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">👑-</a><a href="?user_id={OWNER_ID}&action=ban&target_id={uid}" style="background:#da3633;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🚫</a><a href="?user_id={OWNER_ID}&action=unban&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">✅</a><a href="?user_id={OWNER_ID}&action=mute&target_id={uid}" style="background:#f0883e;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔇</a><a href="?user_id={OWNER_ID}&action=unmute&target_id={uid}" style="background:#2ea043;color:white;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:9px;">🔊</a></div></td></tr>'
+    if not users:
+        users_html = '<tr><td colspan="7" style="text-align:center;color:#8b949e;padding:15px;">Нет пользователей</td></tr>'
+    
+    return f'''
     <!DOCTYPE html>
     <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>👑 Админ-панель AWESOME AI</title>
-        <style>
-            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-            body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0a0e17; color: #e6edf3; padding: 20px; }}
-            .container {{ max-width: 1400px; margin: 0 auto; }}
-            h1 {{ color: #58a6ff; margin-bottom: 5px; font-size: 24px; }}
-            .sub {{ color: #8b949e; margin-bottom: 20px; font-size: 14px; }}
-            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 25px; }}
-            .card {{ background: #161b22; padding: 12px 18px; border-radius: 10px; border: 1px solid #30363d; }}
-            .card span {{ color: #8b949e; font-size: 11px; }}
-            .card .num {{ font-size: 22px; font-weight: 700; color: #58a6ff; }}
-            .card .num.gold {{ color: #f0883e; }}
-            .card .num.orange {{ color: #f0883e; }}
-            .card .num.red {{ color: #f85149; }}
-            
-            .section {{ background: #161b22; border-radius: 10px; border: 1px solid #30363d; padding: 16px 20px; margin-bottom: 16px; }}
-            .section h2 {{ font-size: 16px; margin-bottom: 10px; color: #58a6ff; }}
-            
-            table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-            th {{ background: #1c2128; color: #8b949e; font-weight: 600; font-size: 10px; padding: 8px 10px; text-align: left; }}
-            td {{ padding: 6px 10px; border-bottom: 1px solid #30363d; }}
-            tr:hover {{ background: #1c2128; }}
-            
-            .badge-prem {{ background: #2ea043; color: white; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            .badge-free {{ background: #30363d; color: #8b949e; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            .badge-admin {{ background: #f0883e; color: white; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            .badge-owner {{ background: #da3633; color: white; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            .badge-banned {{ background: #da3633; color: white; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            .badge-muted {{ background: #f0883e; color: white; padding: 1px 8px; border-radius: 10px; font-size: 9px; }}
-            
-            .btn {{ padding: 3px 10px; border: none; border-radius: 3px; cursor: pointer; font-size: 10px; transition: 0.2s; text-decoration: none; display: inline-block; }}
-            .btn-give {{ background: #2ea043; color: white; }}
-            .btn-give:hover {{ background: #3fb950; }}
-            .btn-remove {{ background: #da3633; color: white; }}
-            .btn-remove:hover {{ background: #f85149; }}
-            .btn-admin-give {{ background: #f0883e; color: white; }}
-            .btn-admin-give:hover {{ background: #f0883e; opacity: 0.8; }}
-            .btn-ban {{ background: #da3633; color: white; }}
-            .btn-ban:hover {{ background: #f85149; }}
-            .btn-unban {{ background: #2ea043; color: white; }}
-            .btn-unban:hover {{ background: #3fb950; }}
-            .btn-mute {{ background: #f0883e; color: white; }}
-            .btn-mute:hover {{ background: #f0883e; opacity: 0.8; }}
-            .btn-unmute {{ background: #2ea043; color: white; }}
-            .btn-unmute:hover {{ background: #3fb950; }}
-            
-            .actions {{ display: flex; gap: 3px; flex-wrap: wrap; }}
-            .back {{ color: #58a6ff; text-decoration: none; font-size: 13px; }}
-            .back:hover {{ text-decoration: underline; }}
-            
-            .order-card {{ background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px 14px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }}
-            .order-card .info {{ display: flex; gap: 12px; flex-wrap: wrap; font-size: 13px; }}
-            .order-card .info span {{ color: #8b949e; }}
-            .order-card .info strong {{ color: #e6edf3; }}
-            
-            .empty {{ color: #8b949e; text-align: center; padding: 15px; font-size: 13px; }}
-            .green {{ color: #2ea043; }}
-            .red {{ color: #f85149; }}
-            
-            @media (max-width: 600px) {{
-                .stats {{ grid-template-columns: 1fr 1fr; }}
-                table {{ font-size: 10px; }}
-                td, th {{ padding: 4px 6px; }}
-                .actions {{ gap: 2px; }}
-                .btn {{ font-size: 9px; padding: 2px 6px; }}
-            }}
-        </style>
-    </head>
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>👑 Админ-панель</title>
+    <style>*{{margin:0;padding:0;box-sizing:border-box;}}body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:15px;}}h1{{color:#58a6ff;font-size:20px;margin-bottom:4px;}}.sub{{color:#8b949e;font-size:13px;margin-bottom:15px;}}.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px;margin-bottom:15px;}}.card{{background:#161b22;padding:10px 14px;border-radius:8px;border:1px solid #30363d;}}.card span{{color:#8b949e;font-size:10px;}}.card .num{{font-size:20px;font-weight:700;color:#58a6ff;}}.card .num.gold{{color:#f0883e;}}.card .num.red{{color:#f85149;}}.section{{background:#161b22;border-radius:8px;border:1px solid #30363d;padding:12px 16px;margin-bottom:12px;}}.section h2{{font-size:14px;margin-bottom:8px;color:#58a6ff;}}table{{width:100%;border-collapse:collapse;font-size:11px;}}th{{background:#1c2128;color:#8b949e;font-weight:600;padding:6px 8px;text-align:left;}}td{{padding:5px 8px;border-bottom:1px solid #30363d;}}tr:hover{{background:#1c2128;}}.back{{color:#58a6ff;text-decoration:none;}}@media(max-width:600px){{table{{font-size:9px;}}td,th{{padding:3px 4px;}}}}
+    </style></head>
     <body>
-        <div class="container">
-            <h1>👑 Админ-панель AWESOME AI</h1>
-            <p class="sub">👤 Владелец: @flidges | <a href="/" class="back">← На главную</a></p>
-            
-            <div class="stats">
-                <div class="card"><span>👥 Всего</span><div class="num">{total_users}</div></div>
-                <div class="card"><span>💎 Premium</span><div class="num gold">{premium_count}</div></div>
-                <div class="card"><span>👑 Админов</span><div class="num orange">{admin_count}</div></div>
-                <div class="card"><span>🚫 Забанено</span><div class="num red">{banned_count}</div></div>
-                <div class="card"><span>🔇 Замучено</span><div class="num orange">{muted_count}</div></div>
-            </div>
-            
-            <!-- ЗАКАЗЫ PREMIUM -->
-            <div class="section">
-                <h2>💳 Заказы Premium</h2>
-                {orders_html}
-            </div>
-            
-            <!-- ПОЛЬЗОВАТЕЛИ -->
-            <div class="section">
-                <h2>👥 Пользователи</h2>
-                <div style="overflow-x:auto;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Username</th>
-                                <th>Статус</th>
-                                <th>Сегодня</th>
-                                <th>Всего</th>
-                                <th>Premium до</th>
-                                <th>Действия</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {users_html}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
+    <h1>👑 Админ-панель</h1>
+    <p class="sub">👤 Владелец: @flidges | <a href="/" class="back">← На главную</a></p>
+    <div class="stats">
+        <div class="card"><span>👥 Всего</span><div class="num">{total_users}</div></div>
+        <div class="card"><span>💎 Premium</span><div class="num gold">{premium_count}</div></div>
+        <div class="card"><span>👑 Админов</span><div class="num gold">{admin_count}</div></div>
+        <div class="card"><span>🚫 Забанено</span><div class="num red">{banned_count}</div></div>
+        <div class="card"><span>🔇 Замучено</span><div class="num gold">{muted_count}</div></div>
+    </div>
+    <div class="section"><h2>💳 Заказы Premium</h2>{orders_html}</div>
+    <div class="section"><h2>👥 Пользователи</h2><div style="overflow-x:auto;"><table><thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сегодня</th><th>Всего</th><th>Premium до</th><th>Действия</th></tr></thead><tbody>{users_html}</tbody></table></div></div>
+    </body></html>
     '''
-    
-    # Генерируем HTML для заказов
-    if orders:
-        orders_html = ""
-        for order in orders:
-            oid, uid, created = order
-            orders_html += f'''
-            <div class="order-card">
-                <div class="info">
-                    <span>🆔 <strong>#{oid}</strong></span>
-                    <span>👤 <strong>{uid}</strong></span>
-                    <span>📅 {created}</span>
-                </div>
-                <div class="actions">
-                    <a href="?user_id={OWNER_ID}&action=confirm_order&order_id={oid}" class="btn btn-give">✅ Подтвердить</a>
-                    <a href="?user_id={OWNER_ID}&action=reject_order&order_id={oid}" class="btn btn-remove">❌ Отклонить</a>
-                </div>
-            </div>
-            '''
-    else:
-        orders_html = '<div class="empty">📭 Нет активных заказов</div>'
-    
-    # Генерируем HTML для пользователей
-    if users:
-        users_html = ""
-        for user in users:
-            uid, username, premium, expires, is_admin_flag, msgs_today, total_msgs, joined = user
-            
-            # Статус
-            if uid == OWNER_ID:
-                status = '<span class="badge-owner">👑 ВЛАДЕЛЕЦ</span>'
-            elif is_admin_flag == 1:
-                status = '<span class="badge-admin">👑 АДМИН</span>'
-            elif premium == 1:
-                status = '<span class="badge-prem">💎 PREMIUM</span>'
-            else:
-                status = '<span class="badge-free">🔓 Бесплатный</span>'
-            
-            # Проверка бана/мута
-            if is_banned(uid):
-                status += ' <span class="badge-banned">🚫</span>'
-            if is_muted(uid):
-                status += ' <span class="badge-muted">🔇</span>'
-            
-            expires_str = format_date(expires) if expires else "—"
-            username_display = f"@{username}" if username and username != "unknown" else "Не указан"
-            
-            users_html += f'''
-            <tr>
-                <td><code>{uid}</code></td>
-                <td>{username_display}</td>
-                <td>{status}</td>
-                <td>{msgs_today}</td>
-                <td>{total_msgs}</td>
-                <td>{expires_str}</td>
-                <td>
-                    <div class="actions">
-                        <a href="?user_id={OWNER_ID}&action=giveprem&target_id={uid}" class="btn btn-give">💎+</a>
-                        <a href="?user_id={OWNER_ID}&action=delprem&target_id={uid}" class="btn btn-remove">💎-</a>
-                        <a href="?user_id={OWNER_ID}&action=giveadmin&target_id={uid}" class="btn btn-admin-give">👑+</a>
-                        <a href="?user_id={OWNER_ID}&action=deladmin&target_id={uid}" class="btn btn-remove">👑-</a>
-                        <a href="?user_id={OWNER_ID}&action=ban&target_id={uid}" class="btn btn-ban">🚫</a>
-                        <a href="?user_id={OWNER_ID}&action=unban&target_id={uid}" class="btn btn-unban">✅</a>
-                        <a href="?user_id={OWNER_ID}&action=mute&target_id={uid}" class="btn btn-mute">🔇</a>
-                        <a href="?user_id={OWNER_ID}&action=unmute&target_id={uid}" class="btn btn-unmute">🔊</a>
-                    </div>
-                </td>
-            </tr>
-            '''
-    else:
-        users_html = '<tr><td colspan="7" class="empty">Нет пользователей</td></tr>'
-    
-    return html.replace('{users_html}', users_html).replace('{orders_html}', orders_html)
 
 # ============================================================
-# HTML ИНТЕРФЕЙС (КРАСИВЫЙ ЧАТ)
+# HTML ИНТЕРФЕЙС (ЧАТ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1101,14 +800,12 @@ HTML_TEMPLATE = """
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Inter', sans-serif; background: #080c16; color: #e6edf3; height: 100vh; display: flex; flex-direction: column; overflow: hidden; position: relative; }
-        
         #particles-canvas { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
         .glow { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.2; z-index: 0; pointer-events: none; animation: floatGlow 20s ease-in-out infinite; }
         .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
         .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 5s; }
         .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 10s; transform: translate(-50%, -50%); }
         @keyframes floatGlow { 0%,100% { transform: translate(0,0) scale(1); } 25% { transform: translate(60px,-40px) scale(1.1); } 50% { transform: translate(-40px,60px) scale(0.9); } 75% { transform: translate(30px,30px) scale(1.05); } }
-        
         .header { position: relative; z-index: 1; background: rgba(8,12,22,0.85); backdrop-filter: blur(24px); padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,0.04); display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; flex-wrap: wrap; gap: 6px; }
         .header-left { display: flex; align-items: center; gap: 8px; }
         .logo { font-size: 18px; font-weight: 900; background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0); background-size: 300% 300%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: gradientShift 4s ease-in-out infinite; }
@@ -1116,18 +813,15 @@ HTML_TEMPLATE = """
         .badge { background: linear-gradient(135deg, #238636, #2ea043); color: white; font-size: 8px; font-weight: 600; padding: 2px 8px; border-radius: 12px; text-transform: uppercase; -webkit-text-fill-color: white; display: flex; align-items: center; gap: 3px; }
         .status-dot { width: 5px; height: 5px; border-radius: 50%; background: #2ea043; display: inline-block; animation: pulse 1.5s ease-in-out infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.8); } }
-        
         .menu-buttons { display: flex; gap: 3px; flex-wrap: wrap; }
         .menu-buttons button { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.05); color: #8b949e; padding: 3px 10px; border-radius: 14px; font-size: 10px; font-weight: 500; cursor: pointer; transition: all 0.25s ease; font-family: inherit; }
         .menu-buttons button:hover { background: rgba(88,166,255,0.12); border-color: rgba(88,166,255,0.2); color: #58a6ff; transform: translateY(-1px); }
         .menu-buttons button.premium-btn:hover { background: rgba(240,136,62,0.12); border-color: rgba(240,136,62,0.2); color: #f0883e; }
         .menu-buttons button.danger-btn:hover { background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.2); color: #f85149; }
         .menu-buttons button.admin-btn:hover { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.2); color: #f85149; border-color: #da3633; }
-        
         .chat { position: relative; z-index: 1; flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
         .chat::-webkit-scrollbar { width: 3px; }
         .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
-        
         .message { max-width: 82%; padding: 8px 14px; border-radius: 12px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; font-size: 13px; animation: messageSlide 0.2s ease-out; }
         @keyframes messageSlide { 0% { opacity: 0; transform: translateY(8px) scale(0.97); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
         .user { align-self: flex-end; background: linear-gradient(135deg, #1f6feb, #6c3ce0); color: white; border-bottom-right-radius: 3px; }
@@ -1135,13 +829,11 @@ HTML_TEMPLATE = """
         .bot a { color: #58a6ff; }
         .bot strong, .bot b { color: #f0883e; }
         .message img { max-width: 250px; max-height: 200px; border-radius: 6px; margin-bottom: 4px; border: 1px solid rgba(255,255,255,0.06); }
-        
         .input-area { position: relative; z-index: 1; padding: 8px 14px 12px; border-top: 1px solid rgba(255,255,255,0.04); background: rgba(8,12,22,0.9); backdrop-filter: blur(20px); flex-shrink: 0; }
         .tools-row { display: flex; gap: 3px; flex-wrap: wrap; margin-bottom: 5px; }
         .tools-row button, .tools-row label { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.04); color: #6e7681; padding: 2px 10px; border-radius: 12px; font-size: 10px; font-weight: 500; cursor: pointer; transition: all 0.25s ease; font-family: inherit; }
         .tools-row button:hover, .tools-row label:hover { background: rgba(255,255,255,0.06); border-color: rgba(255,255,255,0.08); color: #e6edf3; }
         .tools-row input[type="file"] { display: none; }
-        
         .input-row { display: flex; gap: 6px; align-items: center; }
         .input-row input { flex: 1; padding: 8px 14px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.06); background: rgba(22,27,34,0.8); color: #e6edf3; font-size: 13px; outline: none; transition: all 0.3s ease; font-family: inherit; }
         .input-row input:focus { border-color: #58a6ff; box-shadow: 0 0 30px rgba(88,166,255,0.05); }
@@ -1149,14 +841,12 @@ HTML_TEMPLATE = """
         .input-row button { padding: 8px 20px; border-radius: 20px; border: none; background: linear-gradient(135deg, #1f6feb, #6c3ce0); color: white; font-weight: 600; font-size: 13px; cursor: pointer; transition: all 0.25s ease; font-family: inherit; white-space: nowrap; }
         .input-row button:hover { transform: scale(1.02); box-shadow: 0 4px 25px rgba(88,166,255,0.15); }
         .input-row button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-        
         .typing { color: #8b949e; font-size: 12px; padding: 4px 16px; align-self: flex-start; animation: pulse 1.2s ease-in-out infinite; }
         .welcome { text-align: center; padding: 25px 20px; color: #8b949e; }
         .welcome h2 { color: #e6edf3; margin-bottom: 4px; font-size: 20px; font-weight: 800; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .welcome p { font-size: 13px; opacity: 0.6; }
         .welcome .features { display: flex; gap: 10px; justify-content: center; margin-top: 10px; flex-wrap: wrap; }
         .welcome .features span { background: rgba(255,255,255,0.03); padding: 3px 12px; border-radius: 14px; font-size: 10px; border: 1px solid rgba(255,255,255,0.04); color: #6e7681; }
-        
         @media (max-width: 640px) {
             .header { padding: 6px 10px; }
             .logo { font-size: 15px; }
@@ -1176,12 +866,8 @@ HTML_TEMPLATE = """
     <div class="glow glow-1"></div>
     <div class="glow glow-2"></div>
     <div class="glow glow-3"></div>
-    
     <header class="header">
-        <div class="header-left">
-            <span class="logo">🧠 AWESOME AI</span>
-            <span class="badge"><span class="status-dot"></span> ONLINE</span>
-        </div>
+        <div class="header-left"><span class="logo">🧠 AWESOME AI</span><span class="badge"><span class="status-dot"></span> ONLINE</span></div>
         <div class="menu-buttons">
             <button onclick="sendCommand('/status')">📊</button>
             <button class="premium-btn" onclick="sendCommand('/premium')">💎</button>
@@ -1192,18 +878,13 @@ HTML_TEMPLATE = """
             <button class="admin-btn" onclick="window.open('/admin?user_id=' + userId, '_blank')">👑</button>
         </div>
     </header>
-    
     <div class="chat" id="chat">
         <div class="welcome">
             <h2>✨ AWESOME AI</h2>
             <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
-            <div class="features">
-                <span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span>
-                <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
-            </div>
+            <div class="features"><span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span><span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span></div>
         </div>
     </div>
-    
     <div class="input-area">
         <div class="tools-row">
             <label for="fileInput">📎</label>
@@ -1220,9 +901,7 @@ HTML_TEMPLATE = """
             <button id="sendBtn" onclick="send()">➤</button>
         </div>
     </div>
-    
     <script>
-        // Частицы
         (function() {
             const canvas = document.getElementById('particles-canvas');
             const ctx = canvas.getContext('2d');
@@ -1272,13 +951,11 @@ HTML_TEMPLATE = """
             }
             animate();
         })();
-        
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         let filesToSend = [];
         let userId = Date.now();
-        
         function addMessage(text, isUser, filePreview = null) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
@@ -1297,7 +974,6 @@ HTML_TEMPLATE = """
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
         }
-        
         function setTyping(show) {
             const existing = document.querySelector('.typing');
             if (existing) existing.remove();
@@ -1309,7 +985,6 @@ HTML_TEMPLATE = """
                 chat.scrollTop = chat.scrollHeight;
             }
         }
-        
         async function send() {
             const text = input.value.trim();
             if (!text && filesToSend.length === 0) return;
@@ -1334,12 +1009,10 @@ HTML_TEMPLATE = """
             sendBtn.disabled = false;
             input.focus();
         }
-        
         async function sendCommand(cmd) {
             input.value = cmd;
             await send();
         }
-        
         function handleFiles(files) {
             for (const file of files) {
                 filesToSend.push(file);
@@ -1354,11 +1027,9 @@ HTML_TEMPLATE = """
                 reader.readAsDataURL(file);
             }
         }
-        
         function clearChat() {
             chat.innerHTML = `<div class="welcome"><h2>✨ AWESOME AI</h2><p>Спрашивай что угодно — я отвечу, решу, поищу</p><div class="features"><span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span><span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span></div></div>`;
         }
-        
         function startRecording() {
             if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
                 addMessage('🎤 Голосовой ввод не поддерживается', false);
@@ -1378,7 +1049,6 @@ HTML_TEMPLATE = """
             };
             recognition.start();
         }
-        
         document.addEventListener('DOMContentLoaded', () => input.focus());
     </script>
 </body>
@@ -1398,22 +1068,17 @@ def chat_full():
         user_id = int(request.form.get('user_id', 1))
         message = request.form.get('message', '')
         files = request.files.getlist('files')
-        
         if not message and not files:
             return jsonify({'error': 'Напиши что-нибудь или прикрепи файл!'})
-        
         ensure_user(user_id, f"user_{user_id}")
-        
         image_description = None
         for file in files:
             if file.content_type and file.content_type.startswith('image/'):
                 content = file.read()
                 image_description = analyze_image(content)
                 break
-        
         if files and not image_description:
             image_description = f"📎 Получен файл: {', '.join([f.filename for f in files])}"
-        
         response = process_message(user_id, message, image_description)
         return jsonify({'reply': response})
     except Exception as e:
@@ -1430,7 +1095,7 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ С АДМИН-ПАНЕЛЬЮ")
+    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ")
     print("=" * 60)
     print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"🌐 http://localhost:{port}")
