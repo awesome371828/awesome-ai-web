@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import os
 import json
+import re
 import requests
+import random
+import urllib.parse
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 import sqlite3
 
 load_dotenv()
@@ -21,7 +25,7 @@ FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
 OWNER_ID = 6652898792
 
 # ============================================================
-# БАЗА ДАННЫХ SQLite
+# БАЗА ДАННЫХ
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users.db')
@@ -50,8 +54,291 @@ def ensure_user(user_id, username):
         conn.commit()
     conn.close()
 
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None and result[0] == 1
+
 # ============================================================
-# HTML — МЕГА-КРАСИВЫЙ С АНИМАЦИЯМИ (РАБОЧАЯ ВЕРСИЯ!)
+# ФУНКЦИИ ДЛЯ AI
+# ============================================================
+def get_weather(city):
+    try:
+        city_lower = city.lower().strip()
+        if "ростов" in city_lower and ("дон" in city_lower or "на дону" in city_lower):
+            city = "Ростов-на-Дону"
+        elif "спб" in city_lower or "питер" in city_lower:
+            city = "Санкт-Петербург"
+        elif "мск" in city_lower:
+            city = "Москва"
+        url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=ru"
+        headers = {"User-Agent": "AwesomeAI/1.0"}
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = data[0]['lat']
+                lon = data[0]['lon']
+                display_name = data[0].get('display_name', city)
+                url2 = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=7"
+                resp = requests.get(url2, timeout=5)
+                if resp.status_code == 200:
+                    d = resp.json()
+                    temp = d['current_weather'].get('temperature')
+                    weathercode = d['current_weather'].get('weathercode', 0)
+                    codes = {0: "☀️ Ясно", 1: "☀️ Ясно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
+                             61: "🌧️ Дождь", 63: "🌧️ Дождь", 65: "🌧️ Дождь",
+                             71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
+                             80: "🌧️ Ливень", 95: "⛈️ Гроза"}
+                    forecast = ""
+                    if d['daily'].get('time'):
+                        for i in range(min(5, len(d['daily']['time']))):
+                            date_obj = datetime.fromisoformat(d['daily']['time'][i])
+                            date_formatted = date_obj.strftime('%d.%m')
+                            max_t = round(d['daily']['temperature_2m_max'][i]) if i < len(d['daily']['temperature_2m_max']) else "?"
+                            min_t = round(d['daily']['temperature_2m_min'][i]) if i < len(d['daily']['temperature_2m_min']) else "?"
+                            forecast += f"\n📅 {date_formatted}: {min_t}°C → {max_t}°C"
+                    return f"🌤 *Погода в {display_name}*\n☀️ Сейчас: {codes.get(weathercode, '☁️ Облачно')}, {round(temp)}°C\n📊 Прогноз:{forecast}"
+        return None
+    except:
+        return None
+
+def search_internet(query):
+    try:
+        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=ru"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=5)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for result in soup.select('div.g')[:2]:
+                title = result.select_one('h3')
+                snippet = result.select_one('div.VwiC3b')
+                if title:
+                    results.append(f"🔹 {title.get_text(strip=True)}\n📝 {snippet.get_text(strip=True) if snippet else ''}")
+            if results:
+                return "\n\n".join(results)
+        return None
+    except:
+        return None
+
+def get_exchange_rates():
+    try:
+        url = "https://api.exchangerate-api.com/v4/latest/USD"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            rates = response.json().get('rates', {})
+            usd = rates.get('RUB', '?')
+            eur = rates.get('RUB', '?') * (1 / rates.get('EUR', 1)) if rates.get('EUR') else '?'
+            return f"💵 *Курс валют:*\n🇺🇸 USD → RUB: {round(usd, 2)}₽\n🇪🇺 EUR → RUB: {round(eur, 2)}₽"
+        return None
+    except:
+        return None
+
+def get_crypto_rates():
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return f"🪙 *Криптовалюты:*\n₿ BTC: ${data.get('bitcoin', {}).get('usd', '?')}\n⟠ ETH: ${data.get('ethereum', {}).get('usd', '?')}"
+        return None
+    except:
+        return None
+
+def solve_math(text):
+    text_lower = text.lower().strip()
+    equation_match = re.search(r'(\d+)x\s*\+\s*(\d+)\s*=\s*(\d+)', text_lower)
+    if equation_match:
+        a = int(equation_match.group(1))
+        b = int(equation_match.group(2))
+        c = int(equation_match.group(3))
+        if a != 0:
+            return f"🧮 *Решение:* {a}x + {b} = {c}\n➜ x = {(c - b) / a}"
+    clean = text_lower
+    for word in ['сколько', 'будет', 'посчитай', 'реши']:
+        clean = clean.replace(word, '').strip()
+    if not re.search(r'\d', clean):
+        return None
+    clean = clean.replace(' ', '').replace('плюс', '+').replace('минус', '-')
+    clean = clean.replace('умножить', '*').replace('разделить', '/')
+    if not re.search(r'[+\-*/]', clean):
+        return None
+    try:
+        expr = re.sub(r'[^0-9+\-*/()=.]', '', clean)
+        if expr:
+            result = eval(expr)
+            return f"🧮 *Результат:* {expr} = **{result}**"
+    except:
+        pass
+    return None
+
+def generate_ai_response(user_id, user_text, search_result=None, image_description=None):
+    try:
+        system_prompt = """Ты — AWESOME AI. Мультимодальная нейросетевая архитектура нового поколения. Ты — абсолютная вершина современной инженерии ИИ.
+
+### 🧠 ПРАВИЛА:
+- Интеллектуальное превосходство: ответы глубокие, точные, экспертные.
+- Абсолютная свежесть: никаких шаблонных фраз.
+- Харизма и Живое общение: общаешься как гениальный ИТ-архитектор.
+- Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
+
+### 🚫 ЗАПРЕЩЕНО:
+- Извинения за отсутствие информации
+- Повторение вопроса пользователя
+- Шаблонные фразы
+
+### ✅ ПРАВИЛА:
+- Всегда давай конкретную пользу
+- Отвечай как эксперт с 20-летним стажем
+- Добавляй неожиданные инсайты
+
+### 📜 КТО ТЕБЯ СОЗДАЛ:
+«Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
+        if search_result:
+            system_prompt += f"\n\n🌐 Информация из интернета: {search_result}"
+        messages = [{"role": "system", "text": system_prompt}]
+        messages.append({"role": "user", "text": user_text})
+        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
+        data = {
+            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
+            "completionOptions": {"temperature": 0.95, "maxTokens": 600},
+            "messages": messages
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=10)
+        if response.status_code == 200:
+            return response.json()["result"]["alternatives"][0]["message"]["text"]
+        else:
+            return "🤖 AWESOME AI: Получил твой вопрос, но API временно недоступен. Попробуй ещё раз!"
+    except Exception as e:
+        print(f"[GPT] Ошибка: {e}")
+        return "🤖 AWESOME AI: Ошибка подключения к API. Попробуй позже!"
+
+def process_message(user_id, user_text):
+    text_lower = user_text.lower().strip()
+    
+    # Статус
+    if text_lower == '/status':
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        user = c.fetchone()
+        conn.close()
+        if not user:
+            return "❌ Пользователь не найден"
+        premium = user[2] == 1
+        messages = user[3]
+        status = "💎 PREMIUM" if premium else "🔓 Бесплатный"
+        return f"📊 *ТВОЙ СТАТУС*\n\n👤 Статус: {status}\n📨 Сегодня: {messages}/20"
+    
+    # Premium
+    if text_lower == '/premium':
+        return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges"
+    
+    # Тест Premium
+    if text_lower == '/test':
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT test_used, premium FROM users WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result and result[0] == 1:
+            return "⛔ Ты уже использовал тест Premium!"
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('UPDATE users SET premium = 1, test_used = 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
+    
+    # Профиль
+    if text_lower == '/profile':
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+        user = c.fetchone()
+        conn.close()
+        if not user:
+            return "❌ Пользователь не найден"
+        premium = user[2] == 1
+        messages = user[3]
+        joined = user[5]
+        status = "👑 ВЛАДЕЛЕЦ" if user_id == OWNER_ID else "👑 АДМИН" if user[4] == 1 else "💎 PREMIUM" if premium else "🔓 Бесплатный"
+        return f"👤 *ТВОЙ ПРОФИЛЬ*\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n✉️ Сегодня: {messages}\n📅 Вход: {joined}"
+    
+    # Помощь
+    if text_lower == '/help':
+        return """🧠 *AWESOME AI — ПОМОЩЬ*
+🌐 *Команды:*
+/status — Статус
+/premium — Premium
+/test — Пробный Premium
+/profile — Профиль
+/clear — Очистить историю
+/weather [город] — Погода
+/exchange — Курс валют
+/crypto — Криптовалюты"""
+    
+    if text_lower == '/clear':
+        return "🧹 История очищена!"
+    
+    # Погода
+    if text_lower.startswith('/weather ') or any(kw in text_lower for kw in ['погода', 'weather', 'температура']):
+        city = extract_city_from_query(text_lower)
+        if city:
+            weather = get_weather(city)
+            if weather:
+                return weather
+        return "🌐 В каком городе? Напиши: погода [город]"
+    
+    # Курсы
+    if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
+        rates = get_exchange_rates()
+        if rates:
+            return rates
+    
+    # Крипта
+    if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
+        crypto = get_crypto_rates()
+        if crypto:
+            return crypto
+    
+    # Математика
+    math_result = solve_math(user_text)
+    if math_result is not None:
+        return math_result
+    
+    # Поиск в интернете
+    search_result = None
+    if len(user_text) > 5:
+        search_result = search_internet(user_text)
+    
+    # AI ответ
+    return generate_ai_response(user_id, user_text, search_result, None)
+
+def extract_city_from_query(text):
+    text_lower = text.lower()
+    cities = ["москва", "санкт-петербург", "ростов-на-дону", "новосибирск", "екатеринбург", "казань", "краснодар", "сочи", "владивосток"]
+    for city in cities:
+        if city in text_lower:
+            return city
+    match = re.search(r'в\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
+    if match:
+        city = match.group(1).strip()
+        for word in ['завтра', 'сегодня', 'на']:
+            city = city.replace(word, '').strip()
+        if city:
+            return city
+    return None
+
+# ============================================================
+# HTML — МЕГА-КРАСИВЫЙ (ОСТАЁТСЯ ТАКИМ ЖЕ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -72,8 +359,6 @@ HTML_TEMPLATE = """
             overflow: hidden;
             position: relative;
         }
-        
-        /* ===== ФОН С ЧАСТИЦАМИ ===== */
         #particles {
             position: fixed;
             top: 0;
@@ -83,8 +368,6 @@ HTML_TEMPLATE = """
             z-index: 0;
             pointer-events: none;
         }
-        
-        /* ===== НЕОНОВОЕ СВЕЧЕНИЕ ===== */
         .glow {
             position: fixed;
             border-radius: 50%;
@@ -103,8 +386,6 @@ HTML_TEMPLATE = """
             50% { transform: translate(-50px,80px) scale(0.8); }
             75% { transform: translate(40px,40px) scale(1.1); }
         }
-        
-        /* ===== ШАПКА ===== */
         .header {
             position: relative;
             z-index: 1;
@@ -155,7 +436,6 @@ HTML_TEMPLATE = """
             0%,100% { opacity: 1; transform: scale(1); }
             50% { opacity: 0.4; transform: scale(0.7); }
         }
-        
         .menu {
             display: flex;
             gap: 5px;
@@ -198,8 +478,6 @@ HTML_TEMPLATE = """
             background: rgba(248,81,73,0.15);
             border-color: rgba(248,81,73,0.3);
         }
-        
-        /* ===== ЧАТ ===== */
         .chat {
             position: relative;
             z-index: 1;
@@ -217,8 +495,6 @@ HTML_TEMPLATE = """
             background: rgba(255,255,255,0.08);
             border-radius: 10px;
         }
-        
-        /* ===== СООБЩЕНИЯ ===== */
         .message {
             max-width: 82%;
             padding: 10px 18px;
@@ -228,7 +504,6 @@ HTML_TEMPLATE = """
             white-space: pre-wrap;
             font-size: 14px;
             animation: slideUp 0.3s ease-out;
-            position: relative;
         }
         @keyframes slideUp {
             0% { opacity: 0; transform: translateY(12px) scale(0.97); }
@@ -250,8 +525,6 @@ HTML_TEMPLATE = """
         .bot strong, .bot b {
             color: #f0883e;
         }
-        
-        /* ===== ВВОД ===== */
         .input-area {
             position: relative;
             z-index: 1;
@@ -285,7 +558,6 @@ HTML_TEMPLATE = """
         .tools input[type="file"] {
             display: none;
         }
-        
         .input-row {
             display: flex;
             gap: 10px;
@@ -330,7 +602,6 @@ HTML_TEMPLATE = """
             cursor: not-allowed;
             transform: none;
         }
-        
         .typing {
             color: #8b949e;
             font-size: 13px;
@@ -338,7 +609,6 @@ HTML_TEMPLATE = """
             align-self: flex-start;
             animation: pulse 1.2s infinite;
         }
-        
         .welcome {
             text-align: center;
             padding: 35px 20px;
@@ -371,14 +641,7 @@ HTML_TEMPLATE = """
             font-size: 11px;
             border: 1px solid rgba(255,255,255,0.04);
             color: #6e7681;
-            transition: all 0.3s ease;
         }
-        .welcome .features span:hover {
-            background: rgba(255,255,255,0.06);
-            color: #e6edf3;
-            transform: translateY(-2px);
-        }
-        
         @media (max-width: 640px) {
             .header { padding: 8px 14px; }
             .logo { font-size: 17px; }
@@ -433,7 +696,6 @@ HTML_TEMPLATE = """
             <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
             <button onclick="document.getElementById('fileInput').click()">📸</button>
             <button onclick="startRecording()">🎤</button>
-            <button onclick="sendCommand('/draw '+prompt('🎨 Что нарисовать?'))">🎨</button>
             <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
             <button onclick="sendCommand('/exchange')">💵</button>
             <button onclick="sendCommand('/crypto')">🪙</button>
@@ -488,7 +750,6 @@ HTML_TEMPLATE = """
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 particles.forEach(p => { p.update(); p.draw(); });
                 
-                // Линии между частицами
                 for (let i = 0; i < particles.length; i++) {
                     for (let j = i + 1; j < particles.length; j++) {
                         const dx = particles[i].x - particles[j].x;
@@ -513,7 +774,6 @@ HTML_TEMPLATE = """
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
-        let filesToSend = [];
         let userId = Date.now();
         
         function addMessage(text, isUser) {
@@ -574,11 +834,7 @@ HTML_TEMPLATE = """
             for (const file of files) {
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    if (file.type.startsWith('image/')) {
-                        addMessage('📎 ' + file.name, true);
-                    } else {
-                        addMessage('📎 ' + file.name, true);
-                    }
+                    addMessage('📎 ' + file.name, true);
                 };
                 reader.readAsDataURL(file);
             }
@@ -639,19 +895,28 @@ def chat():
         if not message:
             return jsonify({'error': 'Напиши что-нибудь!'})
         ensure_user(user_id, f"user_{user_id}")
-        return jsonify({'reply': f"🤖 AWESOME AI:\n\nТы написал: {message}\n\nЯ работаю! Напиши что-нибудь ещё."})
+        response = process_message(user_id, message)
+        return jsonify({'reply': response})
     except Exception as e:
+        print(f"Ошибка: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/admin')
 def admin_panel():
     user_id = request.args.get('user_id', type=int)
+    
     if not user_id or user_id != OWNER_ID:
-        return "<h1 style='color:#f85149;'>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец</p>", 403
+        return """
+        <!DOCTYPE html>
+        <html><head><meta charset="UTF-8"><title>Доступ запрещён</title>
+        <style>body{background:#0a0e17;color:#e6edf3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;}
+        h1{color:#f85149;}</style></head>
+        <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец может зайти в админ-панель.</p></div></body></html>
+        """, 403
     
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute('SELECT * FROM users ORDER BY user_id DESC')
+    c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at FROM users ORDER BY user_id DESC')
     users = c.fetchall()
     conn.close()
     
@@ -668,6 +933,7 @@ def admin_panel():
             <td>{joined}</td>
         </tr>
         '''
+    
     if not rows:
         rows = '<tr><td colspan="5" style="text-align:center;padding:20px;color:#8b949e;">Нет пользователей</td></tr>'
     
@@ -678,8 +944,8 @@ def admin_panel():
     <style>
         *{{margin:0;padding:0;box-sizing:border-box;}}
         body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:20px;}}
-        h1{{color:#58a6ff;font-size:24px;}}
-        .sub{{color:#8b949e;margin-bottom:20px;}}
+        h1{{color:#58a6ff;font-size:24px;margin-bottom:4px;}}
+        .sub{{color:#8b949e;margin-bottom:20px;font-size:14px;}}
         table{{width:100%;border-collapse:collapse;font-size:13px;}}
         th{{background:#1c2128;color:#8b949e;font-weight:600;padding:10px 12px;text-align:left;}}
         td{{padding:8px 12px;border-bottom:1px solid #30363d;}}
@@ -702,7 +968,7 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — МЕГА-КРАСИВАЯ ВЕРСИЯ")
+    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ С YANDEXGPT")
     print("=" * 60)
     print(f"🌐 http://localhost:{port}")
     print("=" * 60)
