@@ -1085,9 +1085,16 @@ def chat():
 @app.route('/api/chat_full', methods=['POST'])
 def chat_full():
     try:
-        user_id = int(request.form.get('user_id', 1))
-        message = request.form.get('message', '')
-        files = request.files.getlist('files')
+        # Проверяем, пришли ли данные как JSON или FormData
+        if request.is_json:
+            data = request.json
+            user_id = data.get('user_id', 1)
+            message = data.get('message', '')
+            files = []
+        else:
+            user_id = int(request.form.get('user_id', 1))
+            message = request.form.get('message', '')
+            files = request.files.getlist('files')
         
         if not message and not files:
             return jsonify({'error': 'Напиши что-нибудь или прикрепи файл!'})
@@ -1096,7 +1103,7 @@ def chat_full():
         
         image_description = None
         for file in files:
-            if file.content_type and file.content_type.startswith('image/'):
+            if file and file.content_type and file.content_type.startswith('image/'):
                 content = file.read()
                 image_description = analyze_image(content)
                 break
@@ -1107,6 +1114,7 @@ def chat_full():
         response = process_message(user_id, message, image_description)
         return jsonify({'reply': response})
     except Exception as e:
+        print(f"Ошибка: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/api/health')
