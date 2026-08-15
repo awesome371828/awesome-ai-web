@@ -1,4 +1,3 @@
-app = Flask(__name__)
 #!/usr/bin/env python3
 import os
 import re
@@ -527,194 +526,408 @@ def process_message(user_id, user_text, image_description=None):
     return generate_ai_response(user_id, user_text, search_result, None)
 
 # ============================================================
-# HTML ИНТЕРФЕЙС
+# HTML — МЕГА-КРАСИВЫЙ С АНИМАЦИЯМИ!
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AWESOME AI</title>
     <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:sans-serif;background:#0a0e17;color:#e6edf3;height:100vh;display:flex;flex-direction:column;}
-        .header{background:#161b22;padding:12px 20px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
-        .logo{font-size:20px;font-weight:bold;background:linear-gradient(135deg,#58a6ff,#f0883e);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-        .menu{display:flex;gap:5px;flex-wrap:wrap;}
-        .menu button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:4px 12px;border-radius:16px;font-size:12px;cursor:pointer;transition:0.2s;}
-        .menu button:hover{background:#30363d;border-color:#58a6ff;color:#58a6ff;}
-        .menu .admin{background:#da3633;color:#fff;}
-        .menu .admin:hover{background:#f85149;}
-        .chat{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px;}
-        .message{max-width:80%;padding:10px 16px;border-radius:12px;line-height:1.5;word-wrap:break-word;white-space:pre-wrap;}
-        .user{align-self:flex-end;background:#1f6feb;color:#fff;}
-        .bot{align-self:flex-start;background:#21262d;border:1px solid #30363d;}
-        .input-area{padding:12px 20px;border-top:1px solid #30363d;display:flex;flex-direction:column;gap:8px;background:#0a0e17;}
-        .tools{display:flex;gap:5px;flex-wrap:wrap;}
-        .tools button,.tools label{background:#21262d;border:1px solid #30363d;color:#8b949e;padding:3px 12px;border-radius:14px;font-size:11px;cursor:pointer;}
-        .tools button:hover,.tools label:hover{background:#30363d;color:#e6edf3;}
-        .tools input[type="file"]{display:none;}
-        .input-row{display:flex;gap:10px;}
-        .input-row input{flex:1;padding:10px 16px;border-radius:24px;border:1px solid #30363d;background:#161b22;color:#e6edf3;font-size:14px;outline:none;}
-        .input-row input:focus{border-color:#58a6ff;}
-        .input-row button{padding:10px 24px;border-radius:24px;border:none;background:#1f6feb;color:#fff;font-weight:600;font-size:14px;cursor:pointer;}
-        .input-row button:hover{background:#388bfd;}
-        .input-row button:disabled{opacity:0.5;cursor:not-allowed;}
-        .welcome{text-align:center;padding:30px 20px;color:#8b949e;}
-        .welcome h2{color:#e6edf3;margin-bottom:6px;}
-        .features{display:flex;gap:12px;justify-content:center;margin-top:12px;flex-wrap:wrap;}
-        .features span{background:#21262d;padding:4px 14px;border-radius:16px;font-size:12px;border:1px solid #30363d;color:#8b949e;}
-        .typing{color:#8b949e;padding:4px 16px;align-self:flex-start;}
-        .message img{max-width:200px;border-radius:8px;margin-bottom:4px;}
-        @media(max-width:640px){.header{padding:8px 12px;}.logo{font-size:16px;}.menu button{font-size:10px;padding:2px 8px;}.message{max-width:92%;font-size:13px;padding:8px 12px;}.chat{padding:10px 12px;}.input-area{padding:8px 12px;}.input-row input{font-size:13px;padding:8px 14px;}.input-row button{padding:8px 16px;font-size:13px;}}
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #080c16; color: #e6edf3;
+            height: 100vh; display: flex; flex-direction: column;
+            overflow: hidden; position: relative;
+        }
+        
+        /* === ФОН С ЧАСТИЦАМИ === */
+        #particles {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 0; pointer-events: none;
+        }
+        
+        /* === НЕОНОВОЕ СВЕЧЕНИЕ === */
+        .glow {
+            position: fixed; border-radius: 50%; filter: blur(100px);
+            opacity: 0.12; z-index: 0; pointer-events: none;
+            animation: floatGlow 20s ease-in-out infinite;
+        }
+        .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
+        .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 5s; }
+        .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 10s; transform: translate(-50%, -50%); }
+        @keyframes floatGlow { 0%,100% { transform: translate(0,0) scale(1); } 25% { transform: translate(60px,-40px) scale(1.2); } 50% { transform: translate(-40px,60px) scale(0.8); } 75% { transform: translate(30px,30px) scale(1.1); } }
+        
+        /* === ШАПКА === */
+        .header {
+            position: relative; z-index: 1;
+            background: rgba(8,12,22,0.85); backdrop-filter: blur(20px);
+            padding: 12px 20px; border-bottom: 1px solid rgba(255,255,255,0.05);
+            display: flex; align-items: center; justify-content: space-between;
+            flex-shrink: 0; flex-wrap: wrap; gap: 8px;
+        }
+        .logo {
+            font-size: 20px; font-weight: 900;
+            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
+            background-size: 300% 300%;
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            animation: gradientShift 4s ease-in-out infinite;
+        }
+        @keyframes gradientShift { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+        .badge {
+            background: linear-gradient(135deg, #238636, #2ea043);
+            color: #fff; font-size: 9px; font-weight: 600;
+            padding: 3px 12px; border-radius: 20px;
+            display: flex; align-items: center; gap: 5px;
+        }
+        .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #2ea043; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
+        
+        .menu { display: flex; gap: 4px; flex-wrap: wrap; }
+        .menu button {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            color: #8b949e; padding: 4px 12px;
+            border-radius: 16px; font-size: 11px; font-weight: 500;
+            cursor: pointer; transition: all 0.25s ease;
+        }
+        .menu button:hover {
+            background: rgba(88,166,255,0.12);
+            border-color: rgba(88,166,255,0.2);
+            color: #58a6ff; transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(88,166,255,0.08);
+        }
+        .menu .premium:hover { background: rgba(240,136,62,0.12); border-color: rgba(240,136,62,0.2); color: #f0883e; }
+        .menu .danger:hover { background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.2); color: #f85149; }
+        .menu .admin { background: rgba(248,81,73,0.08); border-color: rgba(248,81,73,0.15); color: #f85149; }
+        .menu .admin:hover { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.3); }
+        
+        /* === ЧАТ === */
+        .chat {
+            position: relative; z-index: 1;
+            flex: 1; overflow-y: auto;
+            padding: 16px 20px;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .chat::-webkit-scrollbar { width: 3px; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 10px; }
+        
+        .message {
+            max-width: 82%; padding: 10px 16px;
+            border-radius: 14px; line-height: 1.6;
+            word-wrap: break-word; white-space: pre-wrap;
+            font-size: 14px; animation: slideUp 0.3s ease-out;
+        }
+        @keyframes slideUp { 0% { opacity: 0; transform: translateY(10px) scale(0.97); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+        .user { align-self: flex-end; background: linear-gradient(135deg, #1f6feb, #6c3ce0); color: #fff; border-bottom-right-radius: 3px; }
+        .bot { align-self: flex-start; background: rgba(22,27,34,0.9); border: 1px solid rgba(255,255,255,0.04); border-bottom-left-radius: 3px; }
+        .bot strong, .bot b { color: #f0883e; }
+        .message img { max-width: 250px; max-height: 200px; border-radius: 8px; margin-bottom: 4px; border: 1px solid rgba(255,255,255,0.06); }
+        
+        /* === ВВОД === */
+        .input-area {
+            position: relative; z-index: 1;
+            padding: 10px 16px 14px;
+            border-top: 1px solid rgba(255,255,255,0.04);
+            background: rgba(8,12,22,0.9); backdrop-filter: blur(20px);
+            flex-shrink: 0;
+        }
+        .tools {
+            display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px;
+        }
+        .tools button, .tools label {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            color: #6e7681; padding: 3px 12px;
+            border-radius: 14px; font-size: 11px;
+            cursor: pointer; transition: all 0.2s ease;
+        }
+        .tools button:hover, .tools label:hover {
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.08);
+            color: #e6edf3;
+        }
+        .tools input[type="file"] { display: none; }
+        
+        .input-row {
+            display: flex; gap: 8px; align-items: center;
+        }
+        .input-row input {
+            flex: 1; padding: 9px 16px;
+            border-radius: 22px; border: 1px solid rgba(255,255,255,0.06);
+            background: rgba(22,27,34,0.8);
+            color: #e6edf3; font-size: 14px;
+            outline: none; transition: all 0.3s ease;
+        }
+        .input-row input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 30px rgba(88,166,255,0.05);
+        }
+        .input-row input::placeholder { color: #484f58; }
+        .input-row button {
+            padding: 9px 24px;
+            border-radius: 22px; border: none;
+            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
+            color: #fff; font-weight: 600; font-size: 14px;
+            cursor: pointer; transition: all 0.25s ease;
+            white-space: nowrap;
+        }
+        .input-row button:hover { transform: scale(1.03); box-shadow: 0 4px 30px rgba(88,166,255,0.2); }
+        .input-row button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+        
+        .typing {
+            color: #8b949e; font-size: 13px;
+            padding: 4px 16px; align-self: flex-start;
+            animation: pulse 1.2s infinite;
+        }
+        
+        .welcome {
+            text-align: center; padding: 30px 20px; color: #8b949e;
+        }
+        .welcome h2 {
+            color: #e6edf3; margin-bottom: 4px;
+            font-size: 22px; font-weight: 800;
+            background: linear-gradient(135deg, #58a6ff, #f0883e);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .welcome p { font-size: 14px; opacity: 0.6; }
+        .welcome .features {
+            display: flex; gap: 12px; justify-content: center;
+            margin-top: 12px; flex-wrap: wrap;
+        }
+        .welcome .features span {
+            background: rgba(255,255,255,0.03);
+            padding: 4px 14px; border-radius: 16px;
+            font-size: 11px; border: 1px solid rgba(255,255,255,0.04);
+            color: #6e7681;
+        }
+        
+        @media (max-width: 640px) {
+            .header { padding: 8px 12px; }
+            .logo { font-size: 16px; }
+            .menu button { font-size: 9px; padding: 2px 8px; }
+            .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
+            .chat { padding: 10px 12px; }
+            .input-area { padding: 6px 10px 10px; }
+            .input-row input { font-size: 13px; padding: 7px 12px; }
+            .input-row button { padding: 7px 16px; font-size: 13px; }
+            .tools button, .tools label { font-size: 9px; padding: 2px 10px; }
+            .welcome h2 { font-size: 18px; }
+        }
     </style>
 </head>
 <body>
-<div class="header">
-    <span class="logo">🧠 AWESOME AI</span>
-    <div class="menu">
-        <button onclick="sendCommand('/status')">📊</button>
-        <button onclick="sendCommand('/premium')">💎</button>
-        <button onclick="sendCommand('/test')">🎁</button>
-        <button onclick="sendCommand('/profile')">👤</button>
-        <button onclick="sendCommand('/help')">❓</button>
-        <button onclick="clearChat()">🧹</button>
-        <button class="admin" onclick="window.open('/admin?user_id='+userId,'_blank')">👑</button>
-    </div>
-</div>
-<div class="chat" id="chat">
-    <div class="welcome">
-        <h2>✨ AWESOME AI</h2>
-        <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
-        <div class="features">
-            <span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span><span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
+    <canvas id="particles"></canvas>
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+    
+    <header class="header">
+        <span class="logo">🧠 AWESOME AI</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+            <span class="badge"><span class="dot"></span> ONLINE</span>
+            <div class="menu">
+                <button onclick="sendCommand('/status')">📊</button>
+                <button class="premium" onclick="sendCommand('/premium')">💎</button>
+                <button onclick="sendCommand('/test')">🎁</button>
+                <button onclick="sendCommand('/profile')">👤</button>
+                <button onclick="sendCommand('/help')">❓</button>
+                <button class="danger" onclick="clearChat()">🧹</button>
+                <button class="admin" onclick="window.open('/admin?user_id='+userId,'_blank')">👑</button>
+            </div>
+        </div>
+    </header>
+    
+    <div class="chat" id="chat">
+        <div class="welcome">
+            <h2>✨ AWESOME AI</h2>
+            <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
+            <div class="features">
+                <span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span>
+                <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
+            </div>
         </div>
     </div>
-</div>
-<div class="input-area">
-    <div class="tools">
-        <label for="fileInput">📎</label>
-        <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
-        <button onclick="document.getElementById('fileInput').click()">📸</button>
-        <button onclick="startRecording()">🎤</button>
-        <button onclick="sendCommand('/draw '+prompt('🎨 Что нарисовать?'))">🎨</button>
-        <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
-        <button onclick="sendCommand('/exchange')">💵</button>
-        <button onclick="sendCommand('/crypto')">🪙</button>
+    
+    <div class="input-area">
+        <div class="tools">
+            <label for="fileInput">📎</label>
+            <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
+            <button onclick="document.getElementById('fileInput').click()">📸</button>
+            <button onclick="startRecording()">🎤</button>
+            <button onclick="sendCommand('/draw '+prompt('🎨 Что нарисовать?'))">🎨</button>
+            <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
+            <button onclick="sendCommand('/exchange')">💵</button>
+            <button onclick="sendCommand('/crypto')">🪙</button>
+        </div>
+        <div class="input-row">
+            <input id="input" placeholder="Напиши..." onkeydown="if(event.key==='Enter') send()" autofocus>
+            <button id="sendBtn" onclick="send()">➤</button>
+        </div>
     </div>
-    <div class="input-row">
-        <input id="input" placeholder="Напиши..." onkeydown="if(event.key==='Enter') send()" autofocus>
-        <button id="sendBtn" onclick="send()">➤</button>
-    </div>
-</div>
-<script>
-const chat=document.getElementById('chat');
-const input=document.getElementById('input');
-const sendBtn=document.getElementById('sendBtn');
-let filesToSend=[];
-let userId=Date.now();
-
-function addMessage(text,isUser,filePreview=null){
-    const welcome=chat.querySelector('.welcome');
-    if(welcome)welcome.remove();
-    const div=document.createElement('div');
-    div.className='message '+(isUser?'user':'bot');
-    if(filePreview){
-        const img=document.createElement('img');
-        img.src=filePreview;
-        div.appendChild(img);
-        div.appendChild(document.createElement('br'));
-    }
-    let formatted=text.replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>');
-    formatted=formatted.replace(/\n/g,'<br>');
-    div.innerHTML=formatted;
-    chat.appendChild(div);
-    chat.scrollTop=chat.scrollHeight;
-}
-
-function setTyping(show){
-    const existing=document.querySelector('.typing');
-    if(existing)existing.remove();
-    if(show){
-        const div=document.createElement('div');
-        div.className='typing';
-        div.textContent='🧠 AWESOME AI печатает...';
-        chat.appendChild(div);
-        chat.scrollTop=chat.scrollHeight;
-    }
-}
-
-async function send(){
-    const text=input.value.trim();
-    if(!text && filesToSend.length===0)return;
-    input.value='';
-    sendBtn.disabled=true;
-    setTyping(true);
-    const formData=new FormData();
-    formData.append('message',text||'');
-    formData.append('user_id',userId);
-    for(const file of filesToSend)formData.append('files',file);
-    filesToSend=[];
-    try{
-        const response=await fetch('/api/chat_full',{method:'POST',body:formData});
-        const data=await response.json();
-        setTyping(false);
-        if(data.error)addMessage('⚠️ '+data.error,false);
-        else if(data.reply)addMessage(data.reply,false);
-    }catch(e){
-        setTyping(false);
-        addMessage('⚠️ Ошибка соединения',false);
-    }
-    sendBtn.disabled=false;
-    input.focus();
-}
-
-async function sendCommand(cmd){
-    input.value=cmd;
-    await send();
-}
-
-function handleFiles(files){
-    for(const file of files){
-        filesToSend.push(file);
-        const reader=new FileReader();
-        reader.onload=function(e){
-            if(file.type.startsWith('image/')){
-                addMessage('📎 '+file.name,true,e.target.result);
-            }else{
-                addMessage('📎 '+file.name+' ('+(file.size/1024).toFixed(1)+' KB)',true);
+    
+    <script>
+        // === ЧАСТИЦЫ ===
+        (function() {
+            const canvas = document.getElementById('particles');
+            const ctx = canvas.getContext('2d');
+            let particles = [];
+            const count = 60;
+            function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+            window.addEventListener('resize', resize); resize();
+            class Particle {
+                constructor() {
+                    this.x = Math.random() * canvas.width;
+                    this.y = Math.random() * canvas.height;
+                    this.size = Math.random() * 2.5 + 0.5;
+                    this.speedX = (Math.random() - 0.5) * 0.4;
+                    this.speedY = (Math.random() - 0.5) * 0.4;
+                    this.opacity = Math.random() * 0.3 + 0.1;
+                }
+                update() {
+                    this.x += this.speedX; this.y += this.speedY;
+                    if (this.x < 0 || this.x > canvas.width) this.speedX *= -1;
+                    if (this.y < 0 || this.y > canvas.height) this.speedY *= -1;
+                }
+                draw() {
+                    ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(100,150,255,${this.opacity})`; ctx.fill();
+                }
             }
-        };
-        reader.readAsDataURL(file);
-    }
-}
-
-function clearChat(){
-    chat.innerHTML='<div class="welcome"><h2>✨ AWESOME AI</h2><p>Спрашивай что угодно — я отвечу, решу, поищу</p><div class="features"><span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span><span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span></div></div>';
-}
-
-function startRecording(){
-    if(!('webkitSpeechRecognition'in window)&&!('SpeechRecognition'in window)){
-        addMessage('🎤 Голосовой ввод не поддерживается',false);
-        return;
-    }
-    addMessage('🎤 Запись... Говорите',true);
-    const recognition=new(window.SpeechRecognition||window.webkitSpeechRecognition)();
-    recognition.lang='ru-RU';
-    recognition.onresult=function(event){
-        const text=event.results[0][0].transcript;
-        input.value=text;
-        addMessage('🎤 Распознано: '+text,true);
-        send();
-    };
-    recognition.onerror=function(){
-        addMessage('🎤 Не удалось распознать речь',false);
-    };
-    recognition.start();
-}
-document.addEventListener('DOMContentLoaded',()=>input.focus());
-</script>
+            for (let i = 0; i < count; i++) particles.push(new Particle());
+            function animate() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                particles.forEach(p => { p.update(); p.draw(); });
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const dist = Math.sqrt(dx*dx + dy*dy);
+                        if (dist < 120) {
+                            ctx.beginPath();
+                            ctx.strokeStyle = `rgba(100,150,255,${0.04 * (1 - dist/120)})`;
+                            ctx.lineWidth = 0.5;
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+                requestAnimationFrame(animate);
+            }
+            animate();
+        })();
+        
+        // === ЧАТ ===
+        const chat = document.getElementById('chat');
+        const input = document.getElementById('input');
+        const sendBtn = document.getElementById('sendBtn');
+        let filesToSend = [];
+        let userId = Date.now();
+        
+        function addMessage(text, isUser, filePreview = null) {
+            const welcome = chat.querySelector('.welcome');
+            if (welcome) welcome.remove();
+            const div = document.createElement('div');
+            div.className = 'message ' + (isUser ? 'user' : 'bot');
+            if (filePreview) {
+                const img = document.createElement('img');
+                img.src = filePreview;
+                div.appendChild(img);
+                div.appendChild(document.createElement('br'));
+            }
+            let formatted = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            formatted = formatted.replace(/\n/g, '<br>');
+            div.innerHTML = formatted;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+        
+        function setTyping(show) {
+            const existing = document.querySelector('.typing');
+            if (existing) existing.remove();
+            if (show) {
+                const div = document.createElement('div');
+                div.className = 'typing';
+                div.textContent = '🧠 AWESOME AI печатает...';
+                chat.appendChild(div);
+                chat.scrollTop = chat.scrollHeight;
+            }
+        }
+        
+        async function send() {
+            const text = input.value.trim();
+            if (!text && filesToSend.length === 0) return;
+            input.value = '';
+            sendBtn.disabled = true;
+            setTyping(true);
+            const formData = new FormData();
+            formData.append('message', text || '');
+            formData.append('user_id', userId);
+            for (const file of filesToSend) formData.append('files', file);
+            filesToSend = [];
+            try {
+                const response = await fetch('/api/chat_full', { method: 'POST', body: formData });
+                const data = await response.json();
+                setTyping(false);
+                if (data.error) addMessage('⚠️ ' + data.error, false);
+                else if (data.reply) addMessage(data.reply, false);
+            } catch (e) {
+                setTyping(false);
+                addMessage('⚠️ Ошибка соединения', false);
+            }
+            sendBtn.disabled = false;
+            input.focus();
+        }
+        
+        async function sendCommand(cmd) {
+            input.value = cmd;
+            await send();
+        }
+        
+        function handleFiles(files) {
+            for (const file of files) {
+                filesToSend.push(file);
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    if (file.type.startsWith('image/')) {
+                        addMessage('📎 ' + file.name, true, e.target.result);
+                    } else {
+                        addMessage('📎 ' + file.name + ' (' + (file.size/1024).toFixed(1) + ' KB)', true);
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+        
+        function clearChat() {
+            chat.innerHTML = '<div class="welcome"><h2>✨ AWESOME AI</h2><p>Спрашивай что угодно — я отвечу, решу, поищу</p><div class="features"><span>📸 Фото</span><span>🎤 Голос</span><span>🌐 Поиск</span><span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span></div></div>';
+        }
+        
+        function startRecording() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                addMessage('🎤 Голосовой ввод не поддерживается', false);
+                return;
+            }
+            addMessage('🎤 Запись... Говорите', true);
+            const recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+            recognition.lang = 'ru-RU';
+            recognition.onresult = function(event) {
+                const text = event.results[0][0].transcript;
+                input.value = text;
+                addMessage('🎤 Распознано: ' + text, true);
+                send();
+            };
+            recognition.onerror = function() {
+                addMessage('🎤 Не удалось распознать речь', false);
+            };
+            recognition.start();
+        }
+        document.addEventListener('DOMContentLoaded', () => input.focus());
+    </script>
 </body>
 </html>
 """
@@ -875,17 +1088,22 @@ def chat_full():
         user_id = int(request.form.get('user_id', 1))
         message = request.form.get('message', '')
         files = request.files.getlist('files')
+        
         if not message and not files:
             return jsonify({'error': 'Напиши что-нибудь или прикрепи файл!'})
+        
         ensure_user(user_id, f"user_{user_id}")
+        
         image_description = None
         for file in files:
             if file.content_type and file.content_type.startswith('image/'):
                 content = file.read()
                 image_description = analyze_image(content)
                 break
+        
         if files and not image_description:
             image_description = f"📎 Получен файл: {', '.join([f.filename for f in files])}"
+        
         response = process_message(user_id, message, image_description)
         return jsonify({'reply': response})
     except Exception as e:
@@ -898,7 +1116,7 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — РАБОЧАЯ ВЕРСИЯ")
+    print("🧠 AWESOME AI — МЕГА-ВЕРСИЯ")
     print("=" * 60)
     print(f"🌐 http://localhost:{port}")
     print("=" * 60)
