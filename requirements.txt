@@ -1,7 +1,7 @@
-flask
+Flask
 flask-cors
-requests
 python-dotenv
+requests
 beautifulsoup4
 Pillow
 python-dateutil
