@@ -22,10 +22,10 @@ CORS(app)
 # ============================================================
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY") or "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
-OWNER_ID = 1786791896384
+OWNER_ID = 6652898792
 
 # ============================================================
-# БАЗА ДАННЫХ SQLite (РАБОТАЕТ БЕЗ ПАРОЛЕЙ!)
+# БАЗА ДАННЫХ SQLite
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users.db')
@@ -64,8 +64,36 @@ def is_admin(user_id):
     conn.close()
     return result is not None and result[0] == 1
 
+def set_admin(user_id, status):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_admin = ? WHERE user_id = ?', (1 if status else 0, user_id))
+    conn.commit()
+    conn.close()
+
+def set_premium(user_id, days):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET premium = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def remove_premium(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET premium = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def ban_user(user_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
 # ============================================================
-# ФУНКЦИИ ДЛЯ AI
+# ВСЕ ОСТАЛЬНЫЕ ФУНКЦИИ
 # ============================================================
 def get_weather(city):
     try:
@@ -302,7 +330,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML ИНТЕРФЕЙС
+# HTML — КРАСИВЫЙ ТЁМНЫЙ ИНТЕРФЕЙС
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -315,7 +343,7 @@ HTML_TEMPLATE = """
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #080c16;
+            background: #0a0e17;
             color: #e6edf3;
             height: 100vh;
             display: flex;
@@ -331,30 +359,30 @@ HTML_TEMPLATE = """
             height: 100%;
             z-index: 0;
             pointer-events: none;
-            opacity: 0.6;
+            opacity: 0.4;
         }
         .glow {
             position: fixed;
             border-radius: 50%;
-            filter: blur(80px);
-            opacity: 0.1;
+            filter: blur(100px);
+            opacity: 0.08;
             z-index: 0;
             pointer-events: none;
             animation: floatGlow 25s ease-in-out infinite;
         }
-        .glow-1 { width: 400px; height: 400px; top: -100px; right: -100px; background: #6c3ce0; }
-        .glow-2 { width: 350px; height: 350px; bottom: -80px; left: -80px; background: #f0883e; animation-delay: 7s; }
-        .glow-3 { width: 250px; height: 250px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
+        .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
+        .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 7s; }
+        .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
         @keyframes floatGlow {
             0%,100% { transform: translate(0,0) scale(1); }
-            33% { transform: translate(60px,-40px) scale(1.2); }
-            66% { transform: translate(-40px,60px) scale(0.8); }
+            33% { transform: translate(80px,-50px) scale(1.2); }
+            66% { transform: translate(-50px,80px) scale(0.8); }
         }
         .header {
             position: relative;
             z-index: 1;
-            background: rgba(8,12,22,0.8);
-            backdrop-filter: blur(16px);
+            background: rgba(10, 14, 23, 0.85);
+            backdrop-filter: blur(20px);
             padding: 10px 20px;
             border-bottom: 1px solid rgba(255,255,255,0.04);
             display: flex;
@@ -378,8 +406,8 @@ HTML_TEMPLATE = """
             50% { background-position: 100% 50%; }
         }
         .badge {
-            background: rgba(46, 160, 67, 0.2);
-            border: 1px solid rgba(46, 160, 67, 0.3);
+            background: rgba(46, 160, 67, 0.15);
+            border: 1px solid rgba(46, 160, 67, 0.25);
             color: #2ea043;
             font-size: 8px;
             font-weight: 600;
@@ -414,14 +442,15 @@ HTML_TEMPLATE = """
             font-size: 10px;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s ease;
+            transition: all 0.25s ease;
             will-change: transform;
         }
         .menu button:hover {
             background: rgba(88,166,255,0.1);
             border-color: rgba(88,166,255,0.2);
             color: #58a6ff;
-            transform: translateY(-1px);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(88,166,255,0.05);
         }
         .menu .premium:hover {
             background: rgba(240,136,62,0.1);
@@ -459,7 +488,7 @@ HTML_TEMPLATE = """
             max-width: 80%;
             padding: 8px 16px;
             border-radius: 14px;
-            line-height: 1.5;
+            line-height: 1.6;
             word-wrap: break-word;
             white-space: pre-wrap;
             font-size: 13px;
@@ -467,7 +496,7 @@ HTML_TEMPLATE = """
             will-change: transform, opacity;
         }
         @keyframes slideUp {
-            0% { opacity: 0; transform: translateY(8px) scale(0.98); }
+            0% { opacity: 0; transform: translateY(10px) scale(0.97); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
         .user {
@@ -479,7 +508,7 @@ HTML_TEMPLATE = """
         .bot {
             align-self: flex-start;
             background: rgba(22,27,34,0.85);
-            backdrop-filter: blur(8px);
+            backdrop-filter: blur(10px);
             border: 1px solid rgba(255,255,255,0.04);
             border-bottom-left-radius: 2px;
         }
@@ -489,8 +518,8 @@ HTML_TEMPLATE = """
             z-index: 1;
             padding: 10px 16px 14px;
             border-top: 1px solid rgba(255,255,255,0.04);
-            background: rgba(8,12,22,0.85);
-            backdrop-filter: blur(16px);
+            background: rgba(10, 14, 23, 0.85);
+            backdrop-filter: blur(20px);
             flex-shrink: 0;
         }
         .tools {
@@ -525,7 +554,7 @@ HTML_TEMPLATE = """
             padding: 8px 16px;
             border-radius: 22px;
             border: 1px solid rgba(255,255,255,0.06);
-            background: rgba(22,27,34,0.7);
+            background: rgba(22,27,34,0.6);
             color: #e6edf3;
             font-size: 13px;
             outline: none;
@@ -533,6 +562,7 @@ HTML_TEMPLATE = """
         }
         .input-row input:focus {
             border-color: #58a6ff;
+            box-shadow: 0 0 30px rgba(88,166,255,0.03);
         }
         .input-row input::placeholder {
             color: #484f58;
@@ -551,6 +581,7 @@ HTML_TEMPLATE = """
         }
         .input-row button:hover {
             transform: scale(1.02);
+            box-shadow: 0 4px 25px rgba(88,166,255,0.1);
         }
         .input-row button:disabled {
             opacity: 0.4;
@@ -670,7 +701,7 @@ HTML_TEMPLATE = """
             const canvas = document.getElementById('particles');
             const ctx = canvas.getContext('2d');
             let particles = [];
-            const count = 30;
+            const count = 35;
             let animFrame;
             
             function resize() {
@@ -684,9 +715,9 @@ HTML_TEMPLATE = """
                 constructor() {
                     this.x = Math.random() * canvas.width;
                     this.y = Math.random() * canvas.height;
-                    this.size = Math.random() * 1.8 + 0.5;
-                    this.speedX = (Math.random() - 0.5) * 0.3;
-                    this.speedY = (Math.random() - 0.5) * 0.3;
+                    this.size = Math.random() * 2 + 0.5;
+                    this.speedX = (Math.random() - 0.5) * 0.25;
+                    this.speedY = (Math.random() - 0.5) * 0.25;
                     this.opacity = Math.random() * 0.2 + 0.05;
                 }
                 update() {
@@ -719,9 +750,9 @@ HTML_TEMPLATE = """
                             const dx = particles[i].x - particles[j].x;
                             const dy = particles[i].y - particles[j].y;
                             const dist = Math.sqrt(dx * dx + dy * dy);
-                            if (dist < 100) {
+                            if (dist < 120) {
                                 ctx.beginPath();
-                                ctx.strokeStyle = `rgba(136, 192, 255, ${0.02 * (1 - dist / 100)})`;
+                                ctx.strokeStyle = `rgba(136, 192, 255, ${0.02 * (1 - dist / 120)})`;
                                 ctx.lineWidth = 0.3;
                                 ctx.moveTo(particles[i].x, particles[i].y);
                                 ctx.lineTo(particles[j].x, particles[j].y);
@@ -741,7 +772,6 @@ HTML_TEMPLATE = """
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         
-        // ===== ПОСТОЯННЫЙ USER_ID =====
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
             userId = Date.now() + Math.floor(Math.random() * 1000);
@@ -758,7 +788,6 @@ HTML_TEMPLATE = """
             chat.scrollTop = chat.scrollHeight;
         }
         
-        let typingTimeout;
         function setTyping(show) {
             const existing = document.querySelector('.typing');
             if (existing) existing.remove();
@@ -846,6 +875,103 @@ HTML_TEMPLATE = """
 """
 
 # ============================================================
+# АДМИН-ПАНЕЛЬ (КАК В ТГ БОТЕ)
+# ============================================================
+@app.route('/admin')
+def admin_panel():
+    user_id = request.args.get('user_id', type=int)
+    
+    if not user_id or user_id != OWNER_ID:
+        return """
+        <!DOCTYPE html>
+        <html><head><meta charset="UTF-8"><title>Доступ запрещён</title>
+        <style>body{background:#0a0e17;color:#e6edf3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;}
+        h1{color:#f85149;}</style></head>
+        <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец (ID: 6652898792) может зайти в админ-панель.</p></div></body></html>
+        """, 403
+    
+    action = request.args.get('action')
+    target_id = request.args.get('target_id', type=int)
+    
+    if action == 'giveprem' and target_id:
+        set_premium(target_id, 30)
+    if action == 'delprem' and target_id:
+        remove_premium(target_id)
+    if action == 'giveadmin' and target_id:
+        set_admin(target_id, True)
+    if action == 'deladmin' and target_id:
+        set_admin(target_id, False)
+    if action == 'ban' and target_id:
+        ban_user(target_id)
+    
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at FROM users ORDER BY user_id DESC')
+    users = c.fetchall()
+    conn.close()
+    
+    rows = ""
+    for u in users:
+        uid, username, premium, msgs, is_admin_flag, test_used, joined = u
+        status = "👑 ВЛАДЕЛЕЦ" if uid == OWNER_ID else "👑 АДМИН" if is_admin_flag else "💎 PREMIUM" if premium else "🔓 Бесплатный"
+        rows += f'''
+        <tr>
+            <td>{uid}</td>
+            <td>@{username}</td>
+            <td>{status}</td>
+            <td>{msgs}</td>
+            <td>{joined}</td>
+            <td>
+                <a href="?user_id={OWNER_ID}&action=giveprem&target_id={uid}" style="background:#2ea043;color:#fff;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:10px;">💎+</a>
+                <a href="?user_id={OWNER_ID}&action=delprem&target_id={uid}" style="background:#da3633;color:#fff;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:10px;">💎-</a>
+                <a href="?user_id={OWNER_ID}&action=giveadmin&target_id={uid}" style="background:#f0883e;color:#fff;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:10px;">👑+</a>
+                <a href="?user_id={OWNER_ID}&action=deladmin&target_id={uid}" style="background:#da3633;color:#fff;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:10px;">👑-</a>
+                <a href="?user_id={OWNER_ID}&action=ban&target_id={uid}" style="background:#da3633;color:#fff;padding:2px 8px;border-radius:3px;text-decoration:none;font-size:10px;">🚫</a>
+            </td>
+        </tr>
+        '''
+    
+    if not rows:
+        rows = '<tr><td colspan="6" style="text-align:center;padding:20px;color:#8b949e;">Нет пользователей</td></tr>'
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>👑 Админ-панель</title>
+    <style>
+        *{{margin:0;padding:0;box-sizing:border-box;}}
+        body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:20px;}}
+        h1{{color:#58a6ff;font-size:24px;margin-bottom:4px;}}
+        .sub{{color:#8b949e;margin-bottom:20px;font-size:14px;}}
+        table{{width:100%;border-collapse:collapse;font-size:12px;}}
+        th{{background:#1c2128;color:#8b949e;font-weight:600;padding:8px 10px;text-align:left;}}
+        td{{padding:6px 10px;border-bottom:1px solid #30363d;}}
+        tr:hover{{background:#1c2128;}}
+        .back{{color:#58a6ff;text-decoration:none;}}
+        .back:hover{{text-decoration:underline;}}
+        .stats{{display:flex;gap:15px;margin-bottom:20px;flex-wrap:wrap;}}
+        .stats .card{{background:#161b22;padding:10px 18px;border-radius:8px;border:1px solid #30363d;}}
+        .stats .card .num{{font-size:20px;font-weight:700;color:#58a6ff;}}
+        .stats .card .num.gold{{color:#f0883e;}}
+    </style>
+    </head>
+    <body>
+        <h1>👑 Админ-панель AWESOME AI</h1>
+        <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
+        <div class="stats">
+            <div class="card"><span>👥 Всего</span><div class="num">{len(users)}</div></div>
+            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u[2] == 1)}</div></div>
+            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u[4] == 1)}</div></div>
+        </div>
+        <table>
+            <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </body>
+    </html>
+    """
+
+# ============================================================
 # ЭНДПОИНТЫ
 # ============================================================
 @app.route('/')
@@ -867,74 +993,10 @@ def chat():
         print(f"Ошибка: {e}")
         return jsonify({'error': str(e)})
 
-@app.route('/admin')
-def admin_panel():
-    user_id = request.args.get('user_id', type=int)
-    
-    if not user_id or user_id != OWNER_ID:
-        return """
-        <!DOCTYPE html>
-        <html><head><meta charset="UTF-8"><title>Доступ запрещён</title>
-        <style>body{background:#0a0e17;color:#e6edf3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;}
-        h1{color:#f85149;}</style></head>
-        <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец (ID: 6652898792) может зайти в админ-панель.</p></div></body></html>
-        """, 403
-    
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at FROM users ORDER BY user_id DESC')
-    users = c.fetchall()
-    conn.close()
-    
-    rows = ""
-    for u in users:
-        uid, username, premium, msgs, is_admin_flag, test_used, joined = u
-        status = "👑 ВЛАДЕЛЕЦ" if uid == OWNER_ID else "👑 АДМИН" if is_admin_flag else "💎 PREMIUM" if premium else "🔓 Бесплатный"
-        rows += f'''
-        <tr>
-            <td>{uid}</td>
-            <td>@{username}</td>
-            <td>{status}</td>
-            <td>{msgs}</td>
-            <td>{joined}</td>
-        </tr>
-        '''
-    
-    if not rows:
-        rows = '<tr><td colspan="5" style="text-align:center;padding:20px;color:#8b949e;">Нет пользователей</td></tr>'
-    
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>👑 Админ-панель</title>
-    <style>
-        *{{margin:0;padding:0;box-sizing:border-box;}}
-        body{{font-family:sans-serif;background:#0a0e17;color:#e6edf3;padding:20px;}}
-        h1{{color:#58a6ff;font-size:24px;margin-bottom:4px;}}
-        .sub{{color:#8b949e;margin-bottom:20px;font-size:14px;}}
-        table{{width:100%;border-collapse:collapse;font-size:13px;}}
-        th{{background:#1c2128;color:#8b949e;font-weight:600;padding:10px 12px;text-align:left;}}
-        td{{padding:8px 12px;border-bottom:1px solid #30363d;}}
-        tr:hover{{background:#1c2128;}}
-        .back{{color:#58a6ff;text-decoration:none;}}
-        .back:hover{{text-decoration:underline;}}
-    </style>
-    </head>
-    <body>
-        <h1>👑 Админ-панель AWESOME AI</h1>
-        <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
-        <table>
-            <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-    </body>
-    </html>
-    """
-
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — SQLite ВЕРСИЯ (РАБОТАЕТ!)")
+    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ")
     print("=" * 60)
     print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"🌐 http://localhost:{port}")
