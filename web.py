@@ -54,18 +54,8 @@ def ensure_user(user_id, username):
         conn.commit()
     conn.close()
 
-def is_admin(user_id):
-    if user_id == OWNER_ID:
-        return True
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None and result[0] == 1
-
 # ============================================================
-# ФУНКЦИИ ДЛЯ AI
+# ВСЕ ФУНКЦИИ
 # ============================================================
 def get_weather(city):
     try:
@@ -91,10 +81,10 @@ def get_weather(city):
                     d = resp.json()
                     temp = d['current_weather'].get('temperature')
                     weathercode = d['current_weather'].get('weathercode', 0)
-                    codes = {0: "☀️ Ясно", 1: "☀️ Ясно", 2: "⛅ Облачно", 3: "☁️ Пасмурно",
-                             61: "🌧️ Дождь", 63: "🌧️ Дождь", 65: "🌧️ Дождь",
-                             71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
-                             80: "🌧️ Ливень", 95: "⛈️ Гроза"}
+                    codes = {0: "☀️", 1: "☀️", 2: "⛅", 3: "☁️",
+                             61: "🌧️", 63: "🌧️", 65: "🌧️",
+                             71: "❄️", 73: "❄️", 75: "❄️",
+                             80: "🌧️", 95: "⛈️"}
                     forecast = ""
                     if d['daily'].get('time'):
                         for i in range(min(5, len(d['daily']['time']))):
@@ -102,8 +92,8 @@ def get_weather(city):
                             date_formatted = date_obj.strftime('%d.%m')
                             max_t = round(d['daily']['temperature_2m_max'][i]) if i < len(d['daily']['temperature_2m_max']) else "?"
                             min_t = round(d['daily']['temperature_2m_min'][i]) if i < len(d['daily']['temperature_2m_min']) else "?"
-                            forecast += f"\n📅 {date_formatted}: {min_t}°C → {max_t}°C"
-                    return f"🌤 *Погода в {display_name}*\n☀️ Сейчас: {codes.get(weathercode, '☁️ Облачно')}, {round(temp)}°C\n📊 Прогноз:{forecast}"
+                            forecast += f"\n📅 {date_formatted}: {min_t}°→{max_t}°"
+                    return f"🌤 *{display_name}*\n{codes.get(weathercode, '☁️')} {round(temp)}°C{forecast}"
         return None
     except:
         return None
@@ -135,7 +125,7 @@ def get_exchange_rates():
             rates = response.json().get('rates', {})
             usd = rates.get('RUB', '?')
             eur = rates.get('RUB', '?') * (1 / rates.get('EUR', 1)) if rates.get('EUR') else '?'
-            return f"💵 *Курс валют:*\n🇺🇸 USD → RUB: {round(usd, 2)}₽\n🇪🇺 EUR → RUB: {round(eur, 2)}₽"
+            return f"💵 USD→RUB: {round(usd, 2)}₽\n💶 EUR→RUB: {round(eur, 2)}₽"
         return None
     except:
         return None
@@ -146,7 +136,7 @@ def get_crypto_rates():
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            return f"🪙 *Криптовалюты:*\n₿ BTC: ${data.get('bitcoin', {}).get('usd', '?')}\n⟠ ETH: ${data.get('ethereum', {}).get('usd', '?')}"
+            return f"₿ BTC: ${data.get('bitcoin', {}).get('usd', '?')}\n⟠ ETH: ${data.get('ethereum', {}).get('usd', '?')}"
         return None
     except:
         return None
@@ -155,11 +145,9 @@ def solve_math(text):
     text_lower = text.lower().strip()
     equation_match = re.search(r'(\d+)x\s*\+\s*(\d+)\s*=\s*(\d+)', text_lower)
     if equation_match:
-        a = int(equation_match.group(1))
-        b = int(equation_match.group(2))
-        c = int(equation_match.group(3))
+        a, b, c = int(equation_match.group(1)), int(equation_match.group(2)), int(equation_match.group(3))
         if a != 0:
-            return f"🧮 *Решение:* {a}x + {b} = {c}\n➜ x = {(c - b) / a}"
+            return f"🧮 {a}x + {b} = {c}\n➜ x = {(c - b) / a}"
     clean = text_lower
     for word in ['сколько', 'будет', 'посчитай', 'реши']:
         clean = clean.replace(word, '').strip()
@@ -173,57 +161,35 @@ def solve_math(text):
         expr = re.sub(r'[^0-9+\-*/()=.]', '', clean)
         if expr:
             result = eval(expr)
-            return f"🧮 *Результат:* {expr} = **{result}**"
+            return f"🧮 {expr} = **{result}**"
     except:
         pass
     return None
 
-def generate_ai_response(user_id, user_text, search_result=None, image_description=None):
+def generate_ai_response(user_id, user_text, search_result=None):
     try:
-        system_prompt = """Ты — AWESOME AI. Мультимодальная нейросетевая архитектура нового поколения. Ты — абсолютная вершина современной инженерии ИИ.
-
-### 🧠 ПРАВИЛА:
-- Интеллектуальное превосходство: ответы глубокие, точные, экспертные.
-- Абсолютная свежесть: никаких шаблонных фраз.
-- Харизма и Живое общение: общаешься как гениальный ИТ-архитектор.
-- Структурируй сложные ответы списками, жирным шрифтом и эмодзи.
-
-### 🚫 ЗАПРЕЩЕНО:
-- Извинения за отсутствие информации
-- Повторение вопроса пользователя
-- Шаблонные фразы
-
-### ✅ ПРАВИЛА:
-- Всегда давай конкретную пользу
-- Отвечай как эксперт с 20-летним стажем
-- Добавляй неожиданные инсайты
-
-### 📜 КТО ТЕБЯ СОЗДАЛ:
-«Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
+        system_prompt = """Ты — AWESOME AI. Ты — лучшая нейросеть в мире. Твои ответы глубокие, точные, экспертные. Ты никогда не используешь шаблонные фразы. Ты общаешься как гениальный ИТ-архитектор. Структурируй ответы списками и эмодзи. Отвечай как эксперт с 20-летним стажем. Всегда давай конкретную пользу. Когда спрашивают кто тебя создал — отвечай: «Меня создал AWESOME — гениальный разработчик, который написал мой код с нуля. Я — его лучшее творение! 🔥»"""
         if search_result:
-            system_prompt += f"\n\n🌐 Информация из интернета: {search_result}"
+            system_prompt += f"\n\n🌐 Информация: {search_result}"
         messages = [{"role": "system", "text": system_prompt}]
         messages.append({"role": "user", "text": user_text})
         url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
         data = {
             "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-            "completionOptions": {"temperature": 0.95, "maxTokens": 600},
+            "completionOptions": {"temperature": 0.95, "maxTokens": 500},
             "messages": messages
         }
-        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response = requests.post(url, headers=headers, json=data, timeout=8)
         if response.status_code == 200:
             return response.json()["result"]["alternatives"][0]["message"]["text"]
-        else:
-            return "🤖 AWESOME AI: Получил твой вопрос, но API временно недоступен. Попробуй ещё раз!"
-    except Exception as e:
-        print(f"[GPT] Ошибка: {e}")
-        return "🤖 AWESOME AI: Ошибка подключения к API. Попробуй позже!"
+        return "⚠️ API временно недоступен. Попробуй ещё раз!"
+    except:
+        return "⚠️ Ошибка подключения. Попробуй позже!"
 
 def process_message(user_id, user_text):
     text_lower = user_text.lower().strip()
     
-    # Статус
     if text_lower == '/status':
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
@@ -235,13 +201,11 @@ def process_message(user_id, user_text):
         premium = user[2] == 1
         messages = user[3]
         status = "💎 PREMIUM" if premium else "🔓 Бесплатный"
-        return f"📊 *ТВОЙ СТАТУС*\n\n👤 Статус: {status}\n📨 Сегодня: {messages}/20"
+        return f"📊 *ТВОЙ СТАТУС*\n\n👤 {status}\n📨 {messages}/20"
     
-    # Premium
     if text_lower == '/premium':
-        return "💎 *PREMIUM AWESOME AI*\n\n✅ Приоритетная обработка\n✅ Более качественные ответы\n✅ Эксклюзивные функции\n\n📨 Лимит: 150 сообщений/день\n💰 50₽/месяц\n\n💳 Напиши владельцу @flidges"
+        return "💎 *PREMIUM*\n✅ Приоритет\n✅ Качество\n✅ Эксклюзив\n\n📨 150/день\n💰 50₽/мес"
     
-    # Тест Premium
     if text_lower == '/test':
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
@@ -249,15 +213,14 @@ def process_message(user_id, user_text):
         result = c.fetchone()
         conn.close()
         if result and result[0] == 1:
-            return "⛔ Ты уже использовал тест Premium!"
+            return "⛔ Тест уже использован!"
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
         c.execute('UPDATE users SET premium = 1, test_used = 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
-        return "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН!*\n\n✅ Приоритетная обработка\n✅ 150 сообщений в день\n✅ Более качественные ответы\n\n⏳ Доступ активен 24 часа."
+        return "🎉 *ТЕСТ PREMIUM АКТИВИРОВАН!*\n✅ 24 часа\n✅ 150 сообщений"
     
-    # Профиль
     if text_lower == '/profile':
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
@@ -270,57 +233,48 @@ def process_message(user_id, user_text):
         messages = user[3]
         joined = user[5]
         status = "👑 ВЛАДЕЛЕЦ" if user_id == OWNER_ID else "👑 АДМИН" if user[4] == 1 else "💎 PREMIUM" if premium else "🔓 Бесплатный"
-        return f"👤 *ТВОЙ ПРОФИЛЬ*\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n✉️ Сегодня: {messages}\n📅 Вход: {joined}"
+        return f"👤 *ПРОФИЛЬ*\n🆔 {user_id}\n💎 {status}\n✉️ {messages}\n📅 {joined}"
     
-    # Помощь
     if text_lower == '/help':
-        return """🧠 *AWESOME AI — ПОМОЩЬ*
-🌐 *Команды:*
+        return """🧠 *ПОМОЩЬ*
 /status — Статус
 /premium — Premium
-/test — Пробный Premium
+/test — Тест
 /profile — Профиль
-/clear — Очистить историю
 /weather [город] — Погода
-/exchange — Курс валют
-/crypto — Криптовалюты"""
+/exchange — Курс
+/crypto — Крипта"""
     
     if text_lower == '/clear':
-        return "🧹 История очищена!"
+        return "🧹 Очищено!"
     
-    # Погода
-    if text_lower.startswith('/weather ') or any(kw in text_lower for kw in ['погода', 'weather', 'температура']):
+    if text_lower.startswith('/weather ') or any(kw in text_lower for kw in ['погода', 'weather']):
         city = extract_city_from_query(text_lower)
         if city:
             weather = get_weather(city)
             if weather:
                 return weather
-        return "🌐 В каком городе? Напиши: погода [город]"
+        return "🌐 Город?"
     
-    # Курсы
-    if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
+    if any(kw in text_lower for kw in ['курс', 'доллар', 'евро']):
         rates = get_exchange_rates()
         if rates:
             return rates
     
-    # Крипта
     if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
         crypto = get_crypto_rates()
         if crypto:
             return crypto
     
-    # Математика
     math_result = solve_math(user_text)
     if math_result is not None:
         return math_result
     
-    # Поиск в интернете
     search_result = None
     if len(user_text) > 5:
         search_result = search_internet(user_text)
     
-    # AI ответ
-    return generate_ai_response(user_id, user_text, search_result, None)
+    return generate_ai_response(user_id, user_text, search_result)
 
 def extract_city_from_query(text):
     text_lower = text.lower()
@@ -338,7 +292,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML — МЕГА-КРАСИВЫЙ (ОСТАЁТСЯ ТАКИМ ЖЕ)
+# HTML — С ПОСТОЯННЫМ USER_ID!
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -367,186 +321,181 @@ HTML_TEMPLATE = """
             height: 100%;
             z-index: 0;
             pointer-events: none;
+            opacity: 0.6;
         }
         .glow {
             position: fixed;
             border-radius: 50%;
-            filter: blur(120px);
-            opacity: 0.15;
+            filter: blur(80px);
+            opacity: 0.1;
             z-index: 0;
             pointer-events: none;
-            animation: floatGlow 20s ease-in-out infinite;
+            animation: floatGlow 25s ease-in-out infinite;
         }
-        .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
-        .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 5s; }
-        .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 10s; transform: translate(-50%, -50%); }
+        .glow-1 { width: 400px; height: 400px; top: -100px; right: -100px; background: #6c3ce0; }
+        .glow-2 { width: 350px; height: 350px; bottom: -80px; left: -80px; background: #f0883e; animation-delay: 7s; }
+        .glow-3 { width: 250px; height: 250px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
         @keyframes floatGlow {
             0%,100% { transform: translate(0,0) scale(1); }
-            25% { transform: translate(80px,-50px) scale(1.2); }
-            50% { transform: translate(-50px,80px) scale(0.8); }
-            75% { transform: translate(40px,40px) scale(1.1); }
+            33% { transform: translate(60px,-40px) scale(1.2); }
+            66% { transform: translate(-40px,60px) scale(0.8); }
         }
         .header {
             position: relative;
             z-index: 1;
-            background: rgba(8,12,22,0.85);
-            backdrop-filter: blur(24px);
-            padding: 14px 24px;
+            background: rgba(8,12,22,0.8);
+            backdrop-filter: blur(16px);
+            padding: 10px 20px;
             border-bottom: 1px solid rgba(255,255,255,0.04);
             display: flex;
             align-items: center;
             justify-content: space-between;
             flex-shrink: 0;
             flex-wrap: wrap;
-            gap: 10px;
+            gap: 6px;
         }
         .logo {
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 900;
             background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
             background-size: 300% 300%;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            animation: gradientShift 4s ease-in-out infinite;
+            animation: gradientShift 6s ease-in-out infinite;
         }
         @keyframes gradientShift {
             0%,100% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
         }
         .badge {
-            background: linear-gradient(135deg, #238636, #2ea043);
-            color: #fff;
-            font-size: 9px;
+            background: rgba(46, 160, 67, 0.2);
+            border: 1px solid rgba(46, 160, 67, 0.3);
+            color: #2ea043;
+            font-size: 8px;
             font-weight: 600;
-            padding: 3px 12px;
-            border-radius: 20px;
+            padding: 2px 10px;
+            border-radius: 12px;
             display: flex;
             align-items: center;
-            gap: 5px;
-            -webkit-text-fill-color: white;
+            gap: 4px;
         }
         .badge .dot {
-            width: 6px;
-            height: 6px;
+            width: 5px;
+            height: 5px;
             border-radius: 50%;
             background: #2ea043;
-            animation: pulse 1.5s infinite;
+            animation: pulse 2s infinite;
         }
         @keyframes pulse {
             0%,100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.4; transform: scale(0.7); }
+            50% { opacity: 0.3; transform: scale(0.7); }
         }
         .menu {
             display: flex;
-            gap: 5px;
+            gap: 4px;
             flex-wrap: wrap;
         }
         .menu button {
             background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.05);
             color: #8b949e;
-            padding: 4px 14px;
-            border-radius: 18px;
-            font-size: 11px;
+            padding: 3px 12px;
+            border-radius: 14px;
+            font-size: 10px;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.25s ease;
+            transition: all 0.2s ease;
+            will-change: transform;
         }
         .menu button:hover {
-            background: rgba(88,166,255,0.12);
+            background: rgba(88,166,255,0.1);
             border-color: rgba(88,166,255,0.2);
             color: #58a6ff;
-            transform: translateY(-2px);
-            box-shadow: 0 4px 20px rgba(88,166,255,0.08);
+            transform: translateY(-1px);
         }
         .menu .premium:hover {
-            background: rgba(240,136,62,0.12);
+            background: rgba(240,136,62,0.1);
             border-color: rgba(240,136,62,0.2);
             color: #f0883e;
         }
         .menu .danger:hover {
-            background: rgba(248,81,73,0.12);
+            background: rgba(248,81,73,0.1);
             border-color: rgba(248,81,73,0.2);
             color: #f85149;
         }
         .menu .admin {
-            background: rgba(248,81,73,0.08);
-            border-color: rgba(248,81,73,0.15);
+            background: rgba(248,81,73,0.06);
+            border-color: rgba(248,81,73,0.1);
             color: #f85149;
         }
         .menu .admin:hover {
-            background: rgba(248,81,73,0.15);
-            border-color: rgba(248,81,73,0.3);
+            background: rgba(248,81,73,0.12);
+            border-color: rgba(248,81,73,0.2);
         }
         .chat {
             position: relative;
             z-index: 1;
             flex: 1;
             overflow-y: auto;
-            padding: 18px 24px;
+            padding: 16px 20px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 10px;
+            will-change: transform;
         }
-        .chat::-webkit-scrollbar {
-            width: 3px;
-        }
-        .chat::-webkit-scrollbar-thumb {
-            background: rgba(255,255,255,0.08);
-            border-radius: 10px;
-        }
+        .chat::-webkit-scrollbar { width: 2px; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; }
         .message {
-            max-width: 82%;
-            padding: 10px 18px;
-            border-radius: 16px;
-            line-height: 1.6;
+            max-width: 80%;
+            padding: 8px 16px;
+            border-radius: 14px;
+            line-height: 1.5;
             word-wrap: break-word;
             white-space: pre-wrap;
-            font-size: 14px;
-            animation: slideUp 0.3s ease-out;
+            font-size: 13px;
+            animation: slideUp 0.2s ease-out;
+            will-change: transform, opacity;
         }
         @keyframes slideUp {
-            0% { opacity: 0; transform: translateY(12px) scale(0.97); }
+            0% { opacity: 0; transform: translateY(8px) scale(0.98); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
         .user {
             align-self: flex-end;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: #fff;
-            border-bottom-right-radius: 3px;
+            border-bottom-right-radius: 2px;
         }
         .bot {
             align-self: flex-start;
-            background: rgba(22,27,34,0.9);
-            backdrop-filter: blur(12px);
+            background: rgba(22,27,34,0.85);
+            backdrop-filter: blur(8px);
             border: 1px solid rgba(255,255,255,0.04);
-            border-bottom-left-radius: 3px;
+            border-bottom-left-radius: 2px;
         }
-        .bot strong, .bot b {
-            color: #f0883e;
-        }
+        .bot strong, .bot b { color: #f0883e; }
         .input-area {
             position: relative;
             z-index: 1;
-            padding: 12px 20px 16px;
+            padding: 10px 16px 14px;
             border-top: 1px solid rgba(255,255,255,0.04);
-            background: rgba(8,12,22,0.9);
-            backdrop-filter: blur(20px);
+            background: rgba(8,12,22,0.85);
+            backdrop-filter: blur(16px);
             flex-shrink: 0;
         }
         .tools {
             display: flex;
-            gap: 5px;
+            gap: 4px;
             flex-wrap: wrap;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
         .tools button, .tools label {
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.04);
             color: #6e7681;
-            padding: 3px 14px;
-            border-radius: 16px;
-            font-size: 11px;
+            padding: 2px 12px;
+            border-radius: 14px;
+            font-size: 10px;
             cursor: pointer;
             transition: all 0.2s ease;
         }
@@ -555,47 +504,43 @@ HTML_TEMPLATE = """
             border-color: rgba(255,255,255,0.08);
             color: #e6edf3;
         }
-        .tools input[type="file"] {
-            display: none;
-        }
+        .tools input[type="file"] { display: none; }
         .input-row {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
         }
         .input-row input {
             flex: 1;
-            padding: 10px 18px;
-            border-radius: 24px;
+            padding: 8px 16px;
+            border-radius: 22px;
             border: 1px solid rgba(255,255,255,0.06);
-            background: rgba(22,27,34,0.8);
+            background: rgba(22,27,34,0.7);
             color: #e6edf3;
-            font-size: 14px;
+            font-size: 13px;
             outline: none;
-            transition: all 0.3s ease;
+            transition: border 0.3s ease;
         }
         .input-row input:focus {
             border-color: #58a6ff;
-            box-shadow: 0 0 30px rgba(88,166,255,0.05);
         }
         .input-row input::placeholder {
             color: #484f58;
         }
         .input-row button {
-            padding: 10px 28px;
-            border-radius: 24px;
+            padding: 8px 22px;
+            border-radius: 22px;
             border: none;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: #fff;
             font-weight: 600;
-            font-size: 14px;
+            font-size: 13px;
             cursor: pointer;
-            transition: all 0.25s ease;
+            transition: transform 0.2s ease;
             white-space: nowrap;
         }
         .input-row button:hover {
-            transform: scale(1.03);
-            box-shadow: 0 4px 30px rgba(88,166,255,0.2);
+            transform: scale(1.02);
         }
         .input-row button:disabled {
             opacity: 0.4;
@@ -604,56 +549,59 @@ HTML_TEMPLATE = """
         }
         .typing {
             color: #8b949e;
-            font-size: 13px;
-            padding: 4px 18px;
+            font-size: 12px;
+            padding: 4px 16px;
             align-self: flex-start;
-            animation: pulse 1.2s infinite;
+            animation: pulse 1.5s infinite;
         }
         .welcome {
             text-align: center;
-            padding: 35px 20px;
+            padding: 30px 20px;
             color: #8b949e;
         }
         .welcome h2 {
             color: #e6edf3;
             margin-bottom: 4px;
-            font-size: 24px;
+            font-size: 22px;
             font-weight: 800;
             background: linear-gradient(135deg, #58a6ff, #f0883e);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
         .welcome p {
-            font-size: 14px;
+            font-size: 13px;
             opacity: 0.6;
         }
         .welcome .features {
             display: flex;
-            gap: 14px;
+            gap: 10px;
             justify-content: center;
-            margin-top: 14px;
+            margin-top: 12px;
             flex-wrap: wrap;
         }
         .welcome .features span {
             background: rgba(255,255,255,0.03);
-            padding: 5px 16px;
-            border-radius: 18px;
-            font-size: 11px;
+            padding: 3px 14px;
+            border-radius: 16px;
+            font-size: 10px;
             border: 1px solid rgba(255,255,255,0.04);
             color: #6e7681;
+            transition: all 0.2s ease;
+        }
+        .welcome .features span:hover {
+            background: rgba(255,255,255,0.06);
+            color: #e6edf3;
         }
         @media (max-width: 640px) {
-            .header { padding: 8px 14px; }
+            .header { padding: 6px 12px; }
             .logo { font-size: 17px; }
-            .menu button { font-size: 9px; padding: 2px 10px; }
-            .message { max-width: 92%; font-size: 13px; padding: 8px 14px; }
-            .chat { padding: 12px 14px; }
-            .input-area { padding: 8px 14px 12px; }
-            .input-row input { font-size: 13px; padding: 8px 14px; }
-            .input-row button { padding: 8px 18px; font-size: 13px; }
-            .tools button, .tools label { font-size: 9px; padding: 2px 10px; }
-            .welcome h2 { font-size: 19px; }
-            .welcome .features span { font-size: 10px; padding: 3px 12px; }
+            .menu button { font-size: 8px; padding: 2px 8px; }
+            .message { max-width: 92%; font-size: 12px; padding: 6px 12px; }
+            .chat { padding: 10px 12px; }
+            .input-area { padding: 6px 12px 10px; }
+            .input-row input { font-size: 12px; padding: 6px 12px; }
+            .input-row button { padding: 6px 16px; font-size: 12px; }
+            .welcome h2 { font-size: 18px; }
         }
     </style>
 </head>
@@ -665,7 +613,7 @@ HTML_TEMPLATE = """
     
     <header class="header">
         <span class="logo">🧠 AWESOME AI</span>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:6px;">
             <span class="badge"><span class="dot"></span> ONLINE</span>
             <div class="menu">
                 <button onclick="sendCommand('/status')">📊</button>
@@ -674,7 +622,7 @@ HTML_TEMPLATE = """
                 <button onclick="sendCommand('/profile')">👤</button>
                 <button onclick="sendCommand('/help')">❓</button>
                 <button class="danger" onclick="clearChat()">🧹</button>
-                <button class="admin" onclick="window.open('/admin?user_id='+userId,'_blank')">👑</button>
+                <button class="admin" onclick="window.open('/admin?user_id=' + userId, '_blank')">👑</button>
             </div>
         </div>
     </header>
@@ -712,7 +660,8 @@ HTML_TEMPLATE = """
             const canvas = document.getElementById('particles');
             const ctx = canvas.getContext('2d');
             let particles = [];
-            const count = 65;
+            const count = 30;
+            let animFrame;
             
             function resize() {
                 canvas.width = window.innerWidth;
@@ -725,10 +674,10 @@ HTML_TEMPLATE = """
                 constructor() {
                     this.x = Math.random() * canvas.width;
                     this.y = Math.random() * canvas.height;
-                    this.size = Math.random() * 2.5 + 0.5;
-                    this.speedX = (Math.random() - 0.5) * 0.4;
-                    this.speedY = (Math.random() - 0.5) * 0.4;
-                    this.opacity = Math.random() * 0.3 + 0.1;
+                    this.size = Math.random() * 1.8 + 0.5;
+                    this.speedX = (Math.random() - 0.5) * 0.3;
+                    this.speedY = (Math.random() - 0.5) * 0.3;
+                    this.opacity = Math.random() * 0.2 + 0.05;
                 }
                 update() {
                     this.x += this.speedX;
@@ -746,35 +695,50 @@ HTML_TEMPLATE = """
             
             for (let i = 0; i < count; i++) particles.push(new Particle());
             
-            function animate() {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                particles.forEach(p => { p.update(); p.draw(); });
-                
-                for (let i = 0; i < particles.length; i++) {
-                    for (let j = i + 1; j < particles.length; j++) {
-                        const dx = particles[i].x - particles[j].x;
-                        const dy = particles[i].y - particles[j].y;
-                        const dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist < 120) {
-                            ctx.beginPath();
-                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.04 * (1 - dist / 120)})`;
-                            ctx.lineWidth = 0.5;
-                            ctx.moveTo(particles[i].x, particles[i].y);
-                            ctx.lineTo(particles[j].x, particles[j].y);
-                            ctx.stroke();
+            let lastTime = 0;
+            const fps = 30;
+            const interval = 1000 / fps;
+            
+            function animate(time) {
+                if (time - lastTime >= interval) {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    particles.forEach(p => { p.update(); p.draw(); });
+                    
+                    for (let i = 0; i < particles.length; i++) {
+                        for (let j = i + 1; j < particles.length; j++) {
+                            const dx = particles[i].x - particles[j].x;
+                            const dy = particles[i].y - particles[j].y;
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist < 100) {
+                                ctx.beginPath();
+                                ctx.strokeStyle = `rgba(136, 192, 255, ${0.02 * (1 - dist / 100)})`;
+                                ctx.lineWidth = 0.3;
+                                ctx.moveTo(particles[i].x, particles[i].y);
+                                ctx.lineTo(particles[j].x, particles[j].y);
+                                ctx.stroke();
+                            }
                         }
                     }
+                    lastTime = time;
                 }
-                requestAnimationFrame(animate);
+                animFrame = requestAnimationFrame(animate);
             }
-            animate();
+            animate(0);
         })();
         
         // ===== ЛОГИКА ЧАТА =====
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
-        let userId = Date.now();
+        
+        // ===== ПОСТОЯННЫЙ USER_ID =====
+        // Пытаемся получить ID из localStorage, если нет — создаём и сохраняем
+        let userId = localStorage.getItem('awesome_user_id');
+        if (!userId) {
+            userId = Date.now() + Math.floor(Math.random() * 1000);
+            localStorage.setItem('awesome_user_id', userId);
+        }
+        console.log('👤 Ваш постоянный ID:', userId);
         
         function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
@@ -786,6 +750,7 @@ HTML_TEMPLATE = """
             chat.scrollTop = chat.scrollHeight;
         }
         
+        let typingTimeout;
         function setTyping(show) {
             const existing = document.querySelector('.typing');
             if (existing) existing.remove();
@@ -808,15 +773,12 @@ HTML_TEMPLATE = """
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text, user_id: userId })
+                    body: JSON.stringify({ message: text, user_id: parseInt(userId) })
                 });
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) {
-                    addMessage('⚠️ ' + data.error, false);
-                } else if (data.reply) {
-                    addMessage(data.reply, false);
-                }
+                if (data.error) addMessage('⚠️ ' + data.error, false);
+                else if (data.reply) addMessage(data.reply, false);
             } catch (e) {
                 setTyping(false);
                 addMessage('⚠️ Ошибка соединения', false);
@@ -832,11 +794,7 @@ HTML_TEMPLATE = """
         
         function handleFiles(files) {
             for (const file of files) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    addMessage('📎 ' + file.name, true);
-                };
-                reader.readAsDataURL(file);
+                addMessage('📎 ' + file.name, true);
             }
         }
         
@@ -911,7 +869,7 @@ def admin_panel():
         <html><head><meta charset="UTF-8"><title>Доступ запрещён</title>
         <style>body{background:#0a0e17;color:#e6edf3;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;}
         h1{color:#f85149;}</style></head>
-        <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец может зайти в админ-панель.</p></div></body></html>
+        <body><div><h1>🚫 ДОСТУП ЗАПРЕЩЁН</h1><p>Только владелец (ID: 6652898792) может зайти в админ-панель.</p></div></body></html>
         """, 403
     
     conn = sqlite3.connect('users.db')
@@ -956,7 +914,7 @@ def admin_panel():
     </head>
     <body>
         <h1>👑 Админ-панель AWESOME AI</h1>
-        <p class="sub">👤 Владелец: @flidges | <a href="/" class="back">← На главную</a></p>
+        <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
         <table>
             <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th></tr></thead>
             <tbody>{rows}</tbody>
@@ -968,8 +926,9 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ПОЛНАЯ ВЕРСИЯ С YANDEXGPT")
+    print("🧠 AWESOME AI — ПОСТОЯННЫЙ ID")
     print("=" * 60)
+    print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"🌐 http://localhost:{port}")
     print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
