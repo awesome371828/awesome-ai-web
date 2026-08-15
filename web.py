@@ -526,7 +526,7 @@ def process_message(user_id, user_text, image_description=None):
     return generate_ai_response(user_id, user_text, search_result, None)
 
 # ============================================================
-# HTML — МЕГА-КРАСИВЫЙ С АНИМАЦИЯМИ! (РАБОЧАЯ ВЕРСИЯ)
+# HTML — МЕГА-КРАСИВЫЙ С АНИМАЦИЯМИ!
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -544,13 +544,11 @@ HTML_TEMPLATE = """
             overflow: hidden; position: relative;
         }
         
-        /* === ФОН С ЧАСТИЦАМИ === */
         #particles {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             z-index: 0; pointer-events: none;
         }
         
-        /* === НЕОНОВОЕ СВЕЧЕНИЕ === */
         .glow {
             position: fixed; border-radius: 50%; filter: blur(100px);
             opacity: 0.12; z-index: 0; pointer-events: none;
@@ -561,7 +559,6 @@ HTML_TEMPLATE = """
         .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 10s; transform: translate(-50%, -50%); }
         @keyframes floatGlow { 0%,100% { transform: translate(0,0) scale(1); } 25% { transform: translate(60px,-40px) scale(1.2); } 50% { transform: translate(-40px,60px) scale(0.8); } 75% { transform: translate(30px,30px) scale(1.1); } }
         
-        /* === ШАПКА === */
         .header {
             position: relative; z-index: 1;
             background: rgba(8,12,22,0.85); backdrop-filter: blur(20px);
@@ -605,7 +602,6 @@ HTML_TEMPLATE = """
         .menu .admin { background: rgba(248,81,73,0.08); border-color: rgba(248,81,73,0.15); color: #f85149; }
         .menu .admin:hover { background: rgba(248,81,73,0.15); border-color: rgba(248,81,73,0.3); }
         
-        /* === ЧАТ === */
         .chat {
             position: relative; z-index: 1;
             flex: 1; overflow-y: auto;
@@ -627,7 +623,6 @@ HTML_TEMPLATE = """
         .bot strong, .bot b { color: #f0883e; }
         .message img { max-width: 250px; max-height: 200px; border-radius: 8px; margin-bottom: 4px; border: 1px solid rgba(255,255,255,0.06); }
         
-        /* === ВВОД === */
         .input-area {
             position: relative; z-index: 1;
             padding: 10px 16px 14px;
@@ -770,7 +765,6 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
-        // === ЧАСТИЦЫ ===
         (function() {
             const canvas = document.getElementById('particles');
             const ctx = canvas.getContext('2d');
@@ -821,7 +815,6 @@ HTML_TEMPLATE = """
             animate();
         })();
         
-        // === ЧАТ ===
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
@@ -1082,6 +1075,7 @@ def chat():
     except Exception as e:
         return jsonify({'error': str(e)})
 
+# ЭТОТ ЭНДПОИНТ БЫЛ ОТСУТСТВОВАЛ! Я ЕГО ДОБАВИЛ:
 @app.route('/api/chat_full', methods=['POST'])
 def chat_full():
     try:
@@ -1123,7 +1117,7 @@ def health():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("=" * 60)
-    print("🧠 AWESOME AI — ПОЛНАЯ МЕГА-ВЕРСИЯ")
+    print("🧠 AWESOME AI — ИСПРАВЛЕННАЯ ВЕРСИЯ")
     print("=" * 60)
     print(f"🌐 http://localhost:{port}")
     print("=" * 60)
