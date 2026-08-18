@@ -1371,7 +1371,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
 
     search_result = None
     if len(user_text) > 3 and not any(kw in user_text.lower() for kw in ['погода', 'курс', 'биткоин', 'эфириум']):
-                search_result = search_all_internet(user_text)
+        search_result = search_all_internet(user_text)
 
         response = None
         try:
