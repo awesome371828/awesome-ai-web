@@ -46,7 +46,7 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# ХРАНИЛИЩЕ ДИАЛОГОВ
+# ХРАНИЛИЩЕ ДИАЛОГОВ В ПАМЯТИ
 # ============================================================
 dialogs = {}
 
@@ -59,8 +59,8 @@ def add_to_dialog(user_id, role, content):
     if user_id not in dialogs:
         dialogs[user_id] = []
     dialogs[user_id].append({"role": role, "content": content})
-    if len(dialogs[user_id]) > 50:
-        dialogs[user_id] = dialogs[user_id][-50:]
+    if len(dialogs[user_id]) > 100:
+        dialogs[user_id] = dialogs[user_id][-100:]
     save_message(user_id, role, content)
 
 def clear_dialog(user_id):
@@ -68,7 +68,7 @@ def clear_dialog(user_id):
         dialogs[user_id] = []
     clear_history(user_id)
 
-def get_full_dialog(user_id, limit=20):
+def get_full_dialog(user_id, limit=50):
     dialog = get_dialog(user_id)
     if len(dialog) >= limit:
         return dialog[-limit:]
@@ -77,7 +77,7 @@ def get_full_dialog(user_id, limit=20):
     return full[-limit:] if len(full) > limit else full
 
 # ============================================================
-# SQLite БАЗА
+# SQLite БАЗА (ПАМЯТЬ НАВСЕГДА)
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -105,6 +105,7 @@ def init_db():
         content TEXT,
         timestamp TEXT
     )''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_chat_user_id ON chat_history_web(user_id)')
     c.execute('''CREATE TABLE IF NOT EXISTS user_memory_web (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -112,11 +113,28 @@ def init_db():
         fact TEXT,
         timestamp TEXT
     )''')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_memory_user_id ON user_memory_web(user_id)')
     conn.commit()
     conn.close()
     print("✅ SQLite база создана/проверена", flush=True)
 
 init_db()
+
+# ============================================================
+# КЭШ
+# ============================================================
+cache = {}
+
+def get_cached(key, ttl=30):
+    if key in cache:
+        data, ts = cache[key]
+        if time.time() - ts < ttl:
+            return data
+        del cache[key]
+    return None
+
+def set_cache(key, data):
+    cache[key] = (data, time.time())
 
 # ============================================================
 # ВРЕМЯ
@@ -143,6 +161,9 @@ def get_current_date():
 # ФУНКЦИИ БАЗЫ
 # ============================================================
 def get_db_user(user_id):
+    cached = get_cached(f"user_{user_id}")
+    if cached:
+        return cached
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -151,7 +172,9 @@ def get_db_user(user_id):
         conn.close()
         if result:
             columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'is_owner']
-            return dict(zip(columns, result))
+            data = dict(zip(columns, result))
+            set_cache(f"user_{user_id}", data)
+            return data
         return None
     except:
         return None
@@ -172,11 +195,13 @@ def ensure_user(user_id, username):
             c.execute('INSERT OR IGNORE INTO total_stats_web (user_id, total_messages) VALUES (?, 0)', (user_id,))
             conn.commit()
             conn.close()
+            cache.pop(f"user_{user_id}", None)
             return True
         else:
             c.execute('UPDATE users_web SET username = ? WHERE user_id = ?', (username, user_id))
             conn.commit()
             conn.close()
+            cache.pop(f"user_{user_id}", None)
             return False
     except:
         return False
@@ -224,6 +249,7 @@ def set_premium(user_id, duration_str):
         c.execute('UPDATE users_web SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
         conn.commit()
         conn.close()
+        cache.pop(f"user_{user_id}", None)
         return True
     except:
         return False
@@ -235,6 +261,7 @@ def remove_premium(user_id):
         c.execute('UPDATE users_web SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        cache.pop(f"user_{user_id}", None)
         return True
     except:
         return False
@@ -242,6 +269,9 @@ def remove_premium(user_id):
 def get_premium_status(user_id):
     if user_id == OWNER_ID:
         return True
+    cached = get_cached(f"premium_{user_id}")
+    if cached is not None:
+        return cached
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -257,9 +287,12 @@ def get_premium_status(user_id):
                 expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
                 if get_moscow_time() > expires_date:
                     remove_premium(user_id)
+                    set_cache(f"premium_{user_id}", False)
                     return False
             except:
+                set_cache(f"premium_{user_id}", premium == 1)
                 return premium == 1
+        set_cache(f"premium_{user_id}", premium == 1)
         return premium == 1
     except:
         return False
@@ -278,13 +311,18 @@ def get_premium_expires(user_id):
 def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
+    cached = get_cached(f"admin_{user_id}")
+    if cached is not None:
+        return cached
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT is_admin FROM users_web WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         conn.close()
-        return result is not None and result[0] == 1
+        is_admin_flag = result is not None and result[0] == 1
+        set_cache(f"admin_{user_id}", is_admin_flag)
+        return is_admin_flag
     except:
         return False
 
@@ -350,6 +388,8 @@ def set_admin(user_id, is_admin_flag):
         c.execute('UPDATE users_web SET is_admin = ? WHERE user_id = ?', (1 if is_admin_flag else 0, user_id))
         conn.commit()
         conn.close()
+        cache.pop(f"admin_{user_id}", None)
+        cache.pop(f"user_{user_id}", None)
         return True
     except:
         return False
@@ -385,6 +425,7 @@ def increment_messages(user_id):
         c.execute('UPDATE total_stats_web SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+        cache.pop(f"user_{user_id}", None)
     except:
         pass
 
@@ -400,10 +441,14 @@ def reset_messages_if_needed(user_id):
             if last_reset != today:
                 c.execute('UPDATE users_web SET messages_today = 0, last_reset = ? WHERE user_id = ?', (today, user_id))
                 conn.commit()
+                cache.pop(f"user_{user_id}", None)
         conn.close()
     except:
         pass
 
+# ============================================================
+# ПАМЯТЬ НАВСЕГДА!
+# ============================================================
 def save_message(user_id, role, content):
     try:
         conn = sqlite3.connect('users_web.db')
@@ -415,7 +460,7 @@ def save_message(user_id, role, content):
     except:
         pass
 
-def get_history_from_db(user_id, limit=10):
+def get_history_from_db(user_id, limit=50):
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -452,7 +497,7 @@ def recall(user_id, topic):
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
-        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 3',
+        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 5',
                   (user_id, f'%{topic.lower()}%'))
         results = c.fetchall()
         conn.close()
@@ -484,7 +529,7 @@ def get_gigachat_token():
             "Authorization": f"Basic {GIGACHAT_AUTH_KEY}"
         }
         data = {"scope": "GIGACHAT_API_PERS", "grant_type": "client_credentials"}
-        response = requests.post(url, headers=headers, data=data, timeout=5, verify=False)
+        response = requests.post(url, headers=headers, data=data, timeout=3, verify=False)
         if response.status_code == 200:
             gigachat_token_cache = response.json().get("access_token")
             gigachat_token_time = time.time()
@@ -508,11 +553,11 @@ def generate_with_gigachat(user_text, system_prompt):
         data = {
             "model": "GigaChat-Pro",
             "messages": [
-                {"role": "system", "content": system_prompt[:1000]},
+                {"role": "system", "content": system_prompt[:1500]},
                 {"role": "user", "content": user_text}
             ],
             "temperature": 0.85,
-            "max_tokens": 500
+            "max_tokens": 400
         }
         response = requests.post(url, headers=headers, json=data, timeout=5, verify=False)
         if response.status_code == 200:
@@ -532,7 +577,7 @@ def generate_with_yandexgpt(user_text, system_prompt):
             "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
             "completionOptions": {"temperature": 0.85, "maxTokens": 400},
             "messages": [
-                {"role": "system", "text": system_prompt[:1000]},
+                {"role": "system", "text": system_prompt[:1500]},
                 {"role": "user", "text": user_text}
             ]
         }
@@ -548,14 +593,15 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 📅 ТЕКУЩАЯ ДАТА: {current_date}
 🕐 ТЕКУЩЕЕ ВРЕМЯ: {current_time}
 
-ТЫ ЭКСПЕРТ ВО ВСЁМ. ОТВЕЧАЙ МАКСИМАЛЬНО ПОЛЕЗНО И ГЛУБОКО.
+ТЫ ЭКСПЕРТ ВО ВСЁМ. ОТВЕЧАЙ МАКСИМАЛЬНО ПОЛЕЗНО.
+ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ И ВСЕГДА ПОМНИШЬ КОНТЕКСТ!
 
 📜 ТЕБЯ СОЗДАЛ AWESOME — ГЕНИАЛЬНЫЙ РАЗРАБОТЧИК.
 ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ! 🚀"""
 
 def process_message_with_history(user_id, user_text):
     add_to_dialog(user_id, 'user', user_text)
-    history = get_full_dialog(user_id, limit=20)
+    history = get_full_dialog(user_id, limit=30)
     
     system_prompt = SUPER_SYSTEM_PROMPT.format(
         current_date=get_current_date(),
@@ -567,19 +613,21 @@ def process_message_with_history(user_id, user_text):
 
     memories = recall(user_id, user_text)
     if memories:
-        system_prompt += f"\n\n🧠 Память: {' '.join(memories[:2])}"
+        system_prompt += f"\n\n🧠 ЧТО Я ПОМНЮ О ТЕБЕ:\n{' '.join(memories[:3])}"
 
     if history:
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
-        system_prompt += f"\n\n📜 История диалога:\n{history_text}"
+        system_prompt += f"\n\n📜 ПОЛНАЯ ИСТОРИЯ ДИАЛОГА (Я ПОМНЮ ВСЁ!):\n{history_text}"
 
     if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
-            remember(user_id, "интересы", user_text[:100])
+            remember(user_id, "интересы", user_text[:200])
         elif 'работаю' in user_text.lower() or 'учусь' in user_text.lower():
-            remember(user_id, "занятие", user_text[:100])
+            remember(user_id, "занятие", user_text[:200])
         elif 'живу' in user_text.lower() or 'город' in user_text.lower():
-            remember(user_id, "место", user_text[:100])
+            remember(user_id, "место", user_text[:200])
+        elif 'зовут' in user_text.lower() or 'имя' in user_text.lower():
+            remember(user_id, "имя", user_text[:200])
 
     response = None
     try:
@@ -677,7 +725,7 @@ def generate_image(prompt):
     return None
 
 # ============================================================
-# HTML - МЕГА-КРАСИВЫЙ!
+# HTML - КРАСИВЫЙ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -689,7 +737,6 @@ HTML_TEMPLATE = """
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: #0a0e17;
@@ -700,8 +747,6 @@ HTML_TEMPLATE = """
             overflow: hidden;
             position: relative;
         }
-        
-        /* ===== АНИМИРОВАННЫЙ ФОН ===== */
         #bgCanvas {
             position: fixed;
             top: 0;
@@ -711,157 +756,132 @@ HTML_TEMPLATE = """
             z-index: 0;
             pointer-events: none;
         }
-        
         .glow {
             position: fixed;
             border-radius: 50%;
             filter: blur(120px);
-            opacity: 0.1;
+            opacity: 0.06;
             z-index: 0;
             pointer-events: none;
-            animation: floatGlow 20s ease-in-out infinite alternate;
+            animation: floatGlow 25s ease-in-out infinite alternate;
         }
-        .glow-1 { width: 600px; height: 600px; top: -200px; right: -100px; background: #6c3ce0; }
-        .glow-2 { width: 500px; height: 500px; bottom: -150px; left: -100px; background: #f0883e; animation-delay: 7s; }
-        .glow-3 { width: 400px; height: 400px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
-        
+        .glow-1 { width: 500px; height: 500px; top: -200px; right: -100px; background: #6c3ce0; }
+        .glow-2 { width: 400px; height: 400px; bottom: -150px; left: -100px; background: #f0883e; animation-delay: 8s; }
         @keyframes floatGlow {
             0% { transform: translate(0, 0) scale(1); }
-            100% { transform: translate(80px, -60px) scale(1.3); }
+            100% { transform: translate(60px, -40px) scale(1.2); }
         }
-        
-        /* ===== HEADER ===== */
         .header {
             position: relative;
             z-index: 1;
-            background: rgba(10, 14, 23, 0.85);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            padding: 10px 24px;
+            background: rgba(10,14,23,0.85);
+            backdrop-filter: blur(15px);
+            padding: 8px 20px;
             border-bottom: 1px solid rgba(255,255,255,0.04);
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-shrink: 0;
             flex-wrap: wrap;
-            gap: 6px;
+            gap: 4px;
+            min-height: 52px;
         }
-        
         .logo {
-            font-size: 20px;
+            font-size: 18px;
             font-weight: 900;
-            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0, #58a6ff);
+            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
             background-size: 300% 300%;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             animation: gradShift 6s ease-in-out infinite;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
         @keyframes gradShift {
-            0%, 100% { background-position: 0% 50%; }
+            0%,100% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
         }
         .logo .badge {
-            font-size: 8px;
-            background: rgba(46, 160, 67, 0.15);
-            border: 1px solid rgba(46, 160, 67, 0.2);
+            font-size: 7px;
+            background: rgba(46,160,67,0.12);
+            border: 1px solid rgba(46,160,67,0.15);
             color: #2ea043;
-            padding: 2px 10px;
+            padding: 1px 8px;
             border-radius: 20px;
             -webkit-text-fill-color: #2ea043;
         }
-        
         .header-right {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 4px;
             flex-wrap: wrap;
         }
-        
         .memory-badge {
-            font-size: 10px;
+            font-size: 9px;
             color: #6e7681;
-            padding: 3px 12px;
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.04);
+            padding: 2px 10px;
+            background: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.03);
             border-radius: 20px;
             display: flex;
             align-items: center;
             gap: 4px;
         }
         .memory-badge .dot {
-            width: 6px;
-            height: 6px;
+            width: 5px;
+            height: 5px;
             border-radius: 50%;
             background: #2ea043;
             animation: pulse 2s infinite;
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.3; transform: scale(0.7); }
-        }
-        
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
         .menu-btn {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.05);
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
             color: #8b949e;
-            padding: 4px 12px;
-            border-radius: 16px;
-            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 14px;
+            font-size: 9px;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.25s ease;
+            transition: all 0.2s ease;
         }
         .menu-btn:hover {
-            background: rgba(88,166,255,0.08);
-            border-color: rgba(88,166,255,0.15);
+            background: rgba(88,166,255,0.06);
+            border-color: rgba(88,166,255,0.12);
             color: #58a6ff;
-            transform: translateY(-1px);
         }
-        .menu-btn.premium:hover {
-            background: rgba(240,136,62,0.08);
-            border-color: rgba(240,136,62,0.15);
-            color: #f0883e;
-        }
-        .menu-btn.danger:hover {
-            background: rgba(248,81,73,0.08);
-            border-color: rgba(248,81,73,0.15);
-            color: #f85149;
-        }
-        
-        /* ===== CHAT ===== */
+        .menu-btn.danger:hover { background: rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.12); color: #f85149; }
+        .menu-btn.premium:hover { background: rgba(240,136,62,0.06); border-color: rgba(240,136,62,0.12); color: #f0883e; }
         .chat {
             position: relative;
             z-index: 1;
             flex: 1;
             overflow-y: auto;
-            padding: 20px 24px;
+            padding: 16px 20px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 8px;
+            scroll-behavior: smooth;
         }
         .chat::-webkit-scrollbar { width: 3px; }
         .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; }
-        .chat::-webkit-scrollbar-track { background: transparent; }
-        
         .message {
             max-width: 80%;
-            padding: 10px 18px;
-            border-radius: 16px;
-            line-height: 1.7;
-            font-size: 14px;
+            padding: 8px 14px;
+            border-radius: 14px;
+            line-height: 1.6;
+            font-size: 13px;
             word-wrap: break-word;
             white-space: pre-wrap;
-            animation: msgSlide 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-            position: relative;
+            animation: msgSlide 0.25s cubic-bezier(0.16,1,0.3,1);
+            will-change: transform, opacity;
         }
         @keyframes msgSlide {
             0% { opacity: 0; transform: translateY(12px) scale(0.98); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
-        
         .message.user {
             align-self: flex-end;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
@@ -870,39 +890,28 @@ HTML_TEMPLATE = """
         }
         .message.bot {
             align-self: flex-start;
-            background: rgba(22, 27, 34, 0.85);
+            background: rgba(22,27,34,0.85);
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255,255,255,0.04);
             border-bottom-left-radius: 4px;
         }
         .message.bot strong { color: #f0883e; }
-        .message.bot code {
-            background: rgba(255,255,255,0.05);
-            padding: 1px 8px;
-            border-radius: 4px;
-            font-size: 12px;
-            font-family: 'Courier New', monospace;
-        }
-        .message img {
-            max-width: 100%;
-            border-radius: 8px;
-            margin: 4px 0;
-        }
-        
+        .message.bot code { background: rgba(255,255,255,0.05); padding: 1px 8px; border-radius: 4px; font-size: 12px; font-family: 'Courier New', monospace; }
+        .message img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
         .typing-indicator {
             align-self: flex-start;
-            padding: 8px 18px;
-            background: rgba(22, 27, 34, 0.85);
+            padding: 6px 14px;
+            background: rgba(22,27,34,0.85);
             border: 1px solid rgba(255,255,255,0.04);
             border-radius: 16px;
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 5px;
             animation: msgSlide 0.3s ease-out;
         }
         .typing-indicator span {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             border-radius: 50%;
             background: #6e7681;
             animation: typingBounce 1.4s infinite ease-in-out;
@@ -910,160 +919,125 @@ HTML_TEMPLATE = """
         .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
         .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
         @keyframes typingBounce {
-            0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
+            0%,60%,100% { transform: translateY(0); opacity: 0.3; }
             30% { transform: translateY(-8px); opacity: 1; }
         }
-        
-        /* ===== WELCOME ===== */
         .welcome {
             text-align: center;
-            padding: 50px 20px 30px;
+            padding: 40px 20px 20px;
             color: #8b949e;
         }
         .welcome h1 {
-            font-size: 36px;
+            font-size: 32px;
             font-weight: 900;
             background: linear-gradient(135deg, #58a6ff, #f0883e);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 4px;
         }
-        .welcome p {
-            font-size: 14px;
-            opacity: 0.5;
-        }
+        .welcome p { font-size: 13px; opacity: 0.5; }
         .welcome .features {
             display: flex;
             gap: 6px;
             justify-content: center;
-            margin-top: 16px;
+            margin-top: 14px;
             flex-wrap: wrap;
         }
         .welcome .features span {
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.04);
-            padding: 4px 14px;
+            padding: 3px 12px;
             border-radius: 20px;
-            font-size: 10px;
+            font-size: 9px;
             color: #6e7681;
             transition: all 0.2s ease;
             cursor: default;
         }
-        .welcome .features span:hover {
-            background: rgba(255,255,255,0.06);
-            color: #e6edf3;
-        }
-        
-        /* ===== INPUT ===== */
+        .welcome .features span:hover { background: rgba(255,255,255,0.06); color: #e6edf3; }
         .input-area {
             position: relative;
             z-index: 1;
-            padding: 8px 24px 16px;
+            padding: 6px 20px 12px;
             border-top: 1px solid rgba(255,255,255,0.04);
-            background: rgba(10, 14, 23, 0.85);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
+            background: rgba(10,14,23,0.85);
+            backdrop-filter: blur(15px);
             flex-shrink: 0;
         }
-        
         .tools {
             display: flex;
             gap: 4px;
             flex-wrap: wrap;
-            margin-bottom: 6px;
+            margin-bottom: 4px;
         }
         .tools button {
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.04);
             color: #6e7681;
-            padding: 2px 12px;
+            padding: 2px 10px;
             border-radius: 14px;
-            font-size: 9px;
+            font-size: 8px;
             cursor: pointer;
             transition: all 0.2s ease;
         }
-        .tools button:hover {
-            background: rgba(255,255,255,0.06);
-            color: #e6edf3;
-            border-color: rgba(255,255,255,0.08);
-        }
-        
+        .tools button:hover { background: rgba(255,255,255,0.06); color: #e6edf3; }
         .input-row {
             display: flex;
-            gap: 8px;
+            gap: 6px;
             align-items: center;
-            background: rgba(22, 27, 34, 0.6);
+            background: rgba(22,27,34,0.6);
             border-radius: 24px;
-            padding: 4px 4px 4px 16px;
+            padding: 3px 3px 3px 14px;
             border: 1px solid rgba(255,255,255,0.04);
-            transition: border 0.3s ease, box-shadow 0.3s ease;
+            transition: border 0.3s ease;
         }
-        .input-row:focus-within {
-            border-color: rgba(88, 166, 255, 0.3);
-            box-shadow: 0 0 40px rgba(88, 166, 255, 0.03);
-        }
+        .input-row:focus-within { border-color: rgba(88,166,255,0.25); }
         .input-row input {
             flex: 1;
-            padding: 6px 0;
+            padding: 5px 0;
             border: none;
             background: transparent;
             color: #e6edf3;
-            font-size: 14px;
+            font-size: 13px;
             outline: none;
             font-family: inherit;
         }
-        .input-row input::placeholder {
-            color: #484f58;
-        }
+        .input-row input::placeholder { color: #484f58; }
         .input-row button {
-            padding: 6px 20px;
+            padding: 5px 16px;
             border-radius: 20px;
             border: none;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: #fff;
             font-weight: 600;
-            font-size: 13px;
+            font-size: 12px;
             cursor: pointer;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            transition: transform 0.15s ease;
             white-space: nowrap;
         }
-        .input-row button:hover {
-            transform: scale(1.02);
-            box-shadow: 0 4px 30px rgba(88, 166, 255, 0.15);
-        }
-        .input-row button:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        
-        /* ===== RESPONSIVE ===== */
+        .input-row button:hover { transform: scale(1.02); }
+        .input-row button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
         @media (max-width: 640px) {
-            .header { padding: 8px 12px; }
-            .logo { font-size: 16px; }
-            .logo .badge { font-size: 7px; padding: 1px 8px; }
-            .menu-btn { font-size: 8px; padding: 3px 8px; }
-            .chat { padding: 12px 12px; gap: 8px; }
-            .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
-            .welcome h1 { font-size: 26px; }
-            .input-area { padding: 6px 12px 12px; }
-            .input-row { padding: 2px 2px 2px 12px; }
-            .input-row input { font-size: 13px; }
-            .input-row button { padding: 4px 14px; font-size: 12px; }
-            .tools button { font-size: 8px; padding: 1px 8px; }
-            .memory-badge { font-size: 8px; padding: 2px 8px; }
+            .header { padding: 6px 12px; }
+            .logo { font-size: 15px; }
+            .logo .badge { font-size: 6px; padding: 1px 6px; }
+            .menu-btn { font-size: 7px; padding: 2px 7px; }
+            .chat { padding: 10px 12px; gap: 6px; }
+            .message { max-width: 92%; font-size: 12px; padding: 6px 10px; }
+            .welcome h1 { font-size: 24px; }
+            .input-area { padding: 4px 12px 10px; }
+            .input-row { padding: 2px 2px 2px 10px; }
+            .input-row input { font-size: 12px; }
+            .input-row button { padding: 4px 12px; font-size: 11px; }
+            .memory-badge { font-size: 7px; padding: 1px 6px; }
+            .tools button { font-size: 7px; padding: 1px 7px; }
         }
     </style>
 </head>
 <body>
-    <!-- ===== АНИМИРОВАННЫЙ ФОН ===== -->
     <canvas id="bgCanvas"></canvas>
     <div class="glow glow-1"></div>
     <div class="glow glow-2"></div>
-    <div class="glow glow-3"></div>
     
-    <!-- ===== HEADER ===== -->
     <header class="header">
         <span class="logo">
             🧠 AWESOME AI
@@ -1072,7 +1046,7 @@ HTML_TEMPLATE = """
         <div class="header-right">
             <span class="memory-badge">
                 <span class="dot"></span>
-                <span id="msgCount">0 сообщений</span>
+                <span id="msgCount">0</span>
             </span>
             <button class="menu-btn" onclick="sendCommand('/status')">📊</button>
             <button class="menu-btn premium" onclick="sendCommand('/premium')">💎</button>
@@ -1085,23 +1059,17 @@ HTML_TEMPLATE = """
         </div>
     </header>
     
-    <!-- ===== CHAT ===== -->
     <div class="chat" id="chat">
         <div class="welcome">
             <h1>✨ AWESOME AI 2026</h1>
-            <p>Я запоминаю весь диалог — пока ты здесь</p>
+            <p>Я запоминаю ВЕСЬ диалог — навсегда!</p>
             <div class="features">
-                <span>🧠 Память</span>
-                <span>🌤 Погода</span>
-                <span>💵 Курсы</span>
-                <span>🪙 Крипта</span>
-                <span>🎨 Рисование</span>
-                <span>📜 История</span>
+                <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
+                <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
             </div>
         </div>
     </div>
     
-    <!-- ===== INPUT ===== -->
     <div class="input-area">
         <div class="tools">
             <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤 Погода</button>
@@ -1112,77 +1080,11 @@ HTML_TEMPLATE = """
         </div>
         <div class="input-row">
             <input id="input" placeholder="Напиши что-нибудь..." autofocus>
-            <button id="sendBtn">➤ Отправить</button>
+            <button id="sendBtn">➤</button>
         </div>
     </div>
     
     <script>
-        // ===== ФОН (ЧАСТИЦЫ) =====
-        (function() {
-            const canvas = document.getElementById('bgCanvas');
-            const ctx = canvas.getContext('2d');
-            let w, h, particles = [];
-            
-            function resize() {
-                w = canvas.width = window.innerWidth;
-                h = canvas.height = window.innerHeight;
-            }
-            window.addEventListener('resize', resize);
-            resize();
-            
-            class Particle {
-                constructor() {
-                    this.x = Math.random() * w;
-                    this.y = Math.random() * h;
-                    this.r = Math.random() * 2 + 0.5;
-                    this.sx = (Math.random() - 0.5) * 0.2;
-                    this.sy = (Math.random() - 0.5) * 0.2;
-                    this.o = Math.random() * 0.15 + 0.03;
-                }
-                update() {
-                    this.x += this.sx;
-                    this.y += this.sy;
-                    if (this.x < 0 || this.x > w) this.sx *= -1;
-                    if (this.y < 0 || this.y > h) this.sy *= -1;
-                }
-                draw() {
-                    ctx.beginPath();
-                    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
-                    ctx.fillStyle = `rgba(136, 192, 255, ${this.o})`;
-                    ctx.fill();
-                }
-            }
-            
-            for (let i = 0; i < 50; i++) particles.push(new Particle());
-            
-            function drawLines() {
-                for (let i = 0; i < particles.length; i++) {
-                    for (let j = i + 1; j < particles.length; j++) {
-                        const dx = particles[i].x - particles[j].x;
-                        const dy = particles[i].y - particles[j].y;
-                        const d = Math.sqrt(dx*dx + dy*dy);
-                        if (d < 150) {
-                            ctx.beginPath();
-                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.015 * (1 - d/150)})`;
-                            ctx.lineWidth = 0.3;
-                            ctx.moveTo(particles[i].x, particles[i].y);
-                            ctx.lineTo(particles[j].x, particles[j].y);
-                            ctx.stroke();
-                        }
-                    }
-                }
-            }
-            
-            function animate() {
-                ctx.clearRect(0, 0, w, h);
-                particles.forEach(p => { p.update(); p.draw(); });
-                drawLines();
-                requestAnimationFrame(animate);
-            }
-            animate();
-        })();
-        
-        // ===== ЛОГИКА ЧАТА =====
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
@@ -1196,16 +1098,14 @@ HTML_TEMPLATE = """
         
         function updateCount() {
             const msgs = chat.querySelectorAll('.message').length;
-            msgCount.textContent = msgs + ' сообщений';
+            msgCount.textContent = msgs;
         }
         
         function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
-            
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            
             let formatted = text;
             if (!isUser) {
                 formatted = formatted.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
@@ -1214,7 +1114,6 @@ HTML_TEMPLATE = """
                 formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
             }
             formatted = formatted.replace(/\\n/g, '<br>');
-            
             div.innerHTML = formatted;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
@@ -1236,13 +1135,10 @@ HTML_TEMPLATE = """
         async function sendMessage(text) {
             const msg = text || input.value.trim();
             if (!msg) return;
-            
             input.value = '';
             sendBtn.disabled = true;
-            
             addMessage(msg, true);
             showTyping(true);
-            
             try {
                 const resp = await fetch('/api/chat', {
                     method: 'POST',
@@ -1258,7 +1154,6 @@ HTML_TEMPLATE = """
                 showTyping(false);
                 addMessage('⚠️ Ошибка соединения', false);
             }
-            
             sendBtn.disabled = false;
             input.focus();
         }
@@ -1281,12 +1176,8 @@ HTML_TEMPLATE = """
                         <h1>✨ AWESOME AI 2026</h1>
                         <p>Диалог очищен! Начинай заново</p>
                         <div class="features">
-                            <span>🧠 Память</span>
-                            <span>🌤 Погода</span>
-                            <span>💵 Курсы</span>
-                            <span>🪙 Крипта</span>
-                            <span>🎨 Рисование</span>
-                            <span>📜 История</span>
+                            <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
+                            <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
                         </div>
                     </div>
                 `;
@@ -1297,16 +1188,72 @@ HTML_TEMPLATE = """
             }
         }
         
-        // ===== СОБЫТИЯ =====
+        // ФОН
+        (function() {
+            const canvas = document.getElementById('bgCanvas');
+            const ctx = canvas.getContext('2d');
+            let w, h, particles = [];
+            function resize() {
+                w = canvas.width = window.innerWidth;
+                h = canvas.height = window.innerHeight;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+            class Particle {
+                constructor() {
+                    this.x = Math.random() * w;
+                    this.y = Math.random() * h;
+                    this.r = Math.random() * 1.5 + 0.5;
+                    this.sx = (Math.random() - 0.5) * 0.15;
+                    this.sy = (Math.random() - 0.5) * 0.15;
+                    this.o = Math.random() * 0.12 + 0.02;
+                }
+                update() {
+                    this.x += this.sx;
+                    this.y += this.sy;
+                    if (this.x < 0 || this.x > w) this.sx *= -1;
+                    if (this.y < 0 || this.y > h) this.sy *= -1;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(136, 192, 255, ${this.o})`;
+                    ctx.fill();
+                }
+            }
+            for (let i = 0; i < 40; i++) particles.push(new Particle());
+            function drawLines() {
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const d = Math.sqrt(dx*dx + dy*dy);
+                        if (d < 120) {
+                            ctx.beginPath();
+                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.01 * (1 - d/120)})`;
+                            ctx.lineWidth = 0.3;
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+            function animate() {
+                ctx.clearRect(0, 0, w, h);
+                particles.forEach(p => { p.update(); p.draw(); });
+                drawLines();
+                requestAnimationFrame(animate);
+            }
+            animate();
+        })();
+        
         document.addEventListener('DOMContentLoaded', () => {
             input.focus();
             input.addEventListener('keydown', e => {
                 if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
-            sendBtn.addEventListener('click', e => {
-                e.preventDefault();
-                sendMessage();
-            });
+            sendBtn.addEventListener('click', e => { e.preventDefault(); sendMessage(); });
             updateCount();
         });
     </script>
@@ -1353,7 +1300,6 @@ def chat():
         if not can_send_message(user_id):
             return jsonify({'reply': "🔴 Лимит исчерпан!\n💎 Купи Premium: /premium"})
 
-        # Команды
         if message.startswith('/'):
             cmd = message.lower().strip()
             
@@ -1362,11 +1308,11 @@ def chat():
                 return jsonify({'reply': "🧹 Диалог полностью очищен!"})
                 
             elif cmd == '/history':
-                history = get_full_dialog(user_id, limit=20)
+                history = get_full_dialog(user_id, limit=50)
                 if not history:
                     return jsonify({'reply': "📜 История пуста."})
                 text = "📜 *ВЕСЬ ДИАЛОГ:*\n\n"
-                for h in history:
+                for h in history[-30:]:
                     role = "👤 Вы" if h['role'] == 'user' else "🤖 AWESOME AI"
                     text += f"**{role}:** {h['content']}\n\n"
                 return jsonify({'reply': text})
@@ -1383,7 +1329,8 @@ def chat():
                     if expires:
                         status_text += f" (до {format_date(expires)})"
                 dialog_len = len(get_dialog(user_id))
-                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память: {dialog_len} сообщений"
+                db_len = len(get_history_from_db(user_id, 999))
+                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память в сессии: {dialog_len}\n💾 Всего в БД: {db_len}"
                 return jsonify({'reply': reply})
                 
             elif cmd == '/premium':
@@ -1436,6 +1383,7 @@ def chat():
                 premium = get_premium_status(user_id)
                 joined_at = user_data.get('joined_at', 'Неизвестно')
                 dialog_len = len(get_dialog(user_id))
+                db_len = len(get_history_from_db(user_id, 999))
                 
                 if user_id == OWNER_ID:
                     status = "👑 ВЛАДЕЛЕЦ"
@@ -1452,7 +1400,7 @@ def chat():
                     status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
                     limit_text = f"{FREE_LIMIT}/день"
                     
-                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память: {dialog_len} сообщений\n📅 Вход: {joined_at}"})
+                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память в сессии: {dialog_len}\n💾 Всего в БД: {db_len}\n📅 Вход: {joined_at}"})
                 
             elif cmd == '/stats':
                 if user_id == OWNER_ID or is_admin(user_id):
@@ -1489,7 +1437,7 @@ def chat():
                 return jsonify({'reply': """🧠 AWESOME AI — ПОМОЩЬ
 
 🌐 Что я умею:
-• 🧠 Запоминаю ВЕСЬ диалог!
+• 🧠 Запоминаю ВЕСЬ диалог НАВСЕГДА!
 • 🌤 Погода с прогнозом
 • 💵 Курс валют и криптовалют
 • 🎨 Генерирую картинки
@@ -1508,7 +1456,7 @@ def chat():
 /crypto — Криптовалюты
 /draw [описание] — Сгенерировать картинку
 
-🧠 Я запоминаю всё, что ты говоришь, пока ты на сайте!"""})
+🧠 Я ЗАПОМИНАЮ ВСЁ, ЧТО ТЫ ГОВОРИШЬ - НАВСЕГДА!"""})
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
@@ -1701,16 +1649,14 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 50, flush=True)
-    print("🧠 AWESOME AI 2026 - МЕГА-КРАСИВЫЙ!", flush=True)
+    print("🧠 AWESOME AI 2026 - ПАМЯТЬ НАВСЕГДА!", flush=True)
     print("=" * 50, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 50, flush=True)
-    print("✅ Анимированный фон с частицами", flush=True)
-    print("✅ Стильный дизайн с градиентами", flush=True)
-    print("✅ Индикатор печати (анимация точек)", flush=True)
-    print("✅ Бот запоминает ВЕСЬ диалог!", flush=True)
-    print("✅ /clear - очистить диалог", flush=True)
+    print("✅ Бот ЗАПОМИНАЕТ ВЕСЬ ДИАЛОГ!", flush=True)
+    print("✅ Память сохраняется в SQLite навсегда", flush=True)
     print("✅ /history - показать весь диалог", flush=True)
+    print("✅ /clear - очистить диалог", flush=True)
     print("=" * 50, flush=True)
     app.run(host='0.0.0.0', port=port, debug=True)
