@@ -38,7 +38,7 @@ def after_request(response):
 # ============================================================
 # ТВОИ КЛЮЧИ - ИСПРАВЛЕНО!
 # ============================================================
-SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"  # УБЕРИ ПРОБЕЛ!
+SUPABASE_URL = "https://1prxbm_shmuucymkgagwk.supabase.co"  # БЕЗ ПРОБЕЛА!  # БЕЗ ПРОБЕЛА!  # УБЕРИ ПРОБЕЛ!
 # ДОЛЖНО БЫТЬ: https://lprxbm shmuucymkgaqwk.supabase.co
 # ПРОСТО УБЕРИ ПРОБЕЛ МЕЖДУ lprxbm И shmuucymkgaqwk
 
