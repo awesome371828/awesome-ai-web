@@ -1371,26 +1371,26 @@ def process_message_with_history(user_id, user_text, image_description=None):
 
     search_result = None
     if len(user_text) > 3 and not any(kw in user_text.lower() for kw in ['погода', 'курс', 'биткоин', 'эфириум']):
-        search_result = search_all_internet(user_text)
+                search_result = search_all_internet(user_text)
 
-    response = None
-    try:
-        if GIGACHAT_AUTH_KEY:
-            response = generate_with_gigachat(user_text, system_prompt)
-    except:
-        pass
-    if not response:
+        response = None
         try:
-            response = generate_with_yandexgpt(user_text, system_prompt)
-    except:
-        pass
-    if not response:
-        response = generate_fallback_response(user_text, search_result)
+            if GIGACHAT_AUTH_KEY:
+                response = generate_with_gigachat(user_text, system_prompt)
+        except:
+            pass
+        if not response:
+            try:
+                response = generate_with_yandexgpt(user_text, system_prompt)
+            except:
+                pass
+        if not response:
+            response = generate_fallback_response(user_text, search_result)
 
-    if response:
-        save_message(user_id, 'assistant', response)
+        if response:
+            save_message(user_id, 'assistant', response)
 
-    return response
+        return response
 
 # ============================================================
 # HTML ТЕМПЛЕЙТ (УПРОЩЁННЫЙ, РАБОЧИЙ)
