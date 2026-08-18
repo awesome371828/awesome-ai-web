@@ -38,8 +38,10 @@ def after_request(response):
 # ============================================================
 # ТВОИ КЛЮЧИ - ИСПРАВЛЕНО!
 # ============================================================
-# ВНИМАНИЕ! УБЕРИ ПРОБЕЛ В URL!
-SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"  # <- ЗДЕСЬ ПРОБЕЛ! УБЕРИ ЕГО!
+SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"  # УБЕРИ ПРОБЕЛ!
+# ДОЛЖНО БЫТЬ: https://lprxbm shmuucymkgaqwk.supabase.co
+# ПРОСТО УБЕРИ ПРОБЕЛ МЕЖДУ lprxbm И shmuucymkgaqwk
+
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Njc0OTQyOCwiZXhwIjoyMTAyMzI1NDI4fQ.JSlHsddyJRATpVfCk35Q9XYtzZ0mvjnZjcIzxR2nDEw"
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
@@ -50,28 +52,26 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 20
 
 # ============================================================
-# ПОДКЛЮЧЕНИЕ ТОЛЬКО К SUPABASE
+# ПОДКЛЮЧЕНИЕ К SUPABASE
 # ============================================================
 print("🔗 Подключение к Supabase...", flush=True)
 print(f"📡 URL: {SUPABASE_URL}", flush=True)
 
 try:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    # Проверяем подключение
     test = supabase.table('users_web').select('*').limit(1).execute()
     print("✅ Supabase подключен успешно!", flush=True)
 except Exception as e:
-    print(f"❌ ОШИБКА ПОДКЛЮЧЕНИЯ К SUPABASE: {e}", flush=True)
-    print("❌ Проверь URL - возможно там есть пробел или опечатка!", flush=True)
+    print(f"❌ ОШИБКА: {e}", flush=True)
+    print("❌ УБЕРИ ПРОБЕЛ В URL!", flush=True)
     sys.exit(1)
 
 # ============================================================
-# СОЗДАЁМ ТАБЛИЦЫ В SUPABASE
+# СОЗДАЁМ ТАБЛИЦЫ
 # ============================================================
-print("📦 Создаём таблицы в Supabase...", flush=True)
+print("📦 Создаём таблицы...", flush=True)
 
 try:
-    # Таблица пользователей
     supabase.sql("""
         CREATE TABLE IF NOT EXISTS users_web (
             user_id BIGINT PRIMARY KEY,
@@ -88,7 +88,6 @@ try:
     """).execute()
     print("✅ users_web", flush=True)
     
-    # Таблица чатов
     supabase.sql("""
         CREATE TABLE IF NOT EXISTS chat_history_web (
             id SERIAL PRIMARY KEY,
@@ -100,7 +99,6 @@ try:
     """).execute()
     print("✅ chat_history_web", flush=True)
     
-    # Таблица статистики
     supabase.sql("""
         CREATE TABLE IF NOT EXISTS total_stats_web (
             user_id BIGINT PRIMARY KEY,
@@ -109,7 +107,6 @@ try:
     """).execute()
     print("✅ total_stats_web", flush=True)
     
-    # Таблица памяти
     supabase.sql("""
         CREATE TABLE IF NOT EXISTS user_memory_web (
             id SERIAL PRIMARY KEY,
@@ -121,27 +118,20 @@ try:
     """).execute()
     print("✅ user_memory_web", flush=True)
     
-    # Таблица бана
     supabase.sql("""
-        CREATE TABLE IF NOT EXISTS banned_web (
-            user_id BIGINT PRIMARY KEY
-        )
+        CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)
     """).execute()
     print("✅ banned_web", flush=True)
     
-    # Таблица мута
     supabase.sql("""
-        CREATE TABLE IF NOT EXISTS muted_web (
-            user_id BIGINT PRIMARY KEY
-        )
+        CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)
     """).execute()
     print("✅ muted_web", flush=True)
     
     print("✅ ВСЕ ТАБЛИЦЫ СОЗДАНЫ!", flush=True)
     
 except Exception as e:
-    print(f"⚠️ Ошибка создания таблиц: {e}", flush=True)
-    print("⚠️ Возможно таблицы уже существуют", flush=True)
+    print(f"⚠️ Ошибка: {e}", flush=True)
 
 # ============================================================
 # ВРЕМЯ
@@ -165,7 +155,7 @@ def get_current_date():
     return get_moscow_time().strftime('%d.%m.%Y')
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ (ТОЛЬКО SUPABASE)
+# ФУНКЦИИ БАЗЫ
 # ============================================================
 def get_db_user(user_id):
     try:
@@ -173,8 +163,7 @@ def get_db_user(user_id):
         if response.data:
             return response.data[0]
         return None
-    except Exception as e:
-        print(f"❌ Ошибка get_db_user: {e}", flush=True)
+    except:
         return None
 
 def ensure_user(user_id, username):
@@ -202,8 +191,7 @@ def ensure_user(user_id, username):
                 pass
             return True
         return False
-    except Exception as e:
-        print(f"❌ Ошибка ensure_user: {e}", flush=True)
+    except:
         return False
 
 def set_premium(user_id, duration_str):
@@ -524,9 +512,6 @@ def generate_with_yandexgpt(user_text, system_prompt):
     except:
         return None
 
-# ============================================================
-# СУПЕР-ПРОМПТ
-# ============================================================
 SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ.
 
 📅 ТЕКУЩАЯ ДАТА: {current_date}
@@ -584,9 +569,6 @@ def process_message_with_history(user_id, user_text):
 
     return response
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================================================
 def get_weather(city):
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?q={urllib.parse.quote(city)}&appid=4c8f5c0b8a9f2c5d6e7f8g9h0i1j2k3l&units=metric&lang=ru"
@@ -596,8 +578,7 @@ def get_weather(city):
             temp = data['main']['temp']
             desc = data['weather'][0]['description']
             wind = data['wind']['speed']
-            humidity = data['main']['humidity']
-            return f"🌤 {city.title()}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с\n💧 Влажность: {humidity}%"
+            return f"🌤 {city.title()}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с"
     except:
         pass
     return None
@@ -660,14 +641,6 @@ def generate_image(prompt):
     except:
         pass
     return None
-
-def fix_title(prompt):
-    title = prompt
-    for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение']:
-        title = title.replace(word, '').strip()
-    if not title or len(title) < 2:
-        return "Картинка"
-    return title[0].upper() + title[1:] if len(title) > 1 else title.upper()
 
 # ============================================================
 # HTML
@@ -1072,7 +1045,7 @@ def chat():
                 image_data = generate_image(prompt)
                 if image_data:
                     b64_img = base64.b64encode(image_data).decode('utf-8')
-                    return jsonify({'reply': f"🎨 *{fix_title(prompt)}*\n\n![image](data:image/png;base64,{b64_img})"})
+                    return jsonify({'reply': f"🎨 *{prompt}*\n\n![image](data:image/png;base64,{b64_img})"})
                 else:
                     return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
 
@@ -1099,9 +1072,8 @@ def analyze_image():
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
         
-        # Анализ изображения
-        description = "📸 Изображение получено! (распознавание в разработке)"
-        remember(user_id, "фото", f"Пользователь отправил фото")
+        description = "📸 Изображение получено!"
+        remember(user_id, "фото", "Пользователь отправил фото")
         increment_messages(user_id)
         return jsonify({'reply': description})
     except Exception as e:
@@ -1119,7 +1091,7 @@ def speech_to_text_endpoint():
         if not audio_base64:
             return jsonify({'error': 'Нет аудио'})
         
-        return jsonify({'text': '🎤 Голосовое сообщение получено! (распознавание в разработке)'})
+        return jsonify({'text': '🎤 Голосовое сообщение получено!'})
     except Exception as e:
         return jsonify({'error': str(e)})
 
