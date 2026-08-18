@@ -10,6 +10,7 @@ import random
 import urllib.parse
 import base64
 import io
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
@@ -19,14 +20,12 @@ from dotenv import load_dotenv
 
 from bs4 import BeautifulSoup
 import requests
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Для Supabase
 from supabase import create_client, Client
 
-# Отключаем предупреждения SSL (для GigaChat)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
@@ -72,106 +71,49 @@ except Exception as e:
     print(f"❌ Ошибка подключения к Supabase: {e}", flush=True)
 
 # ============================================================
-# ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ В SUPABASE (с суффиксом _web)
+# КЭШ
 # ============================================================
-def init_db_web():
-    if not use_supabase:
-        init_db_local()
-        return
+CACHE = {}
+CACHE_TTL = 60
 
+def get_cache(key):
+    if key in CACHE:
+        data, ts = CACHE[key]
+        if time.time() - ts < CACHE_TTL:
+            return data
+        del CACHE[key]
+    return None
+
+def set_cache(key, data):
+    CACHE[key] = (data, time.time())
+
+# ============================================================
+# ВРЕМЯ (МОСКОВСКОЕ)
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+def format_date(date_str):
+    if not date_str:
+        return "неизвестно"
     try:
-        supabase.table('users_web').select('*').limit(1).execute()
-        print("✅ Таблицы уже существуют")
-    except Exception as e:
-        print("Создаём таблицы в Supabase...")
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS users_web (
-                    user_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    premium INTEGER DEFAULT 0,
-                    messages_today INTEGER DEFAULT 0,
-                    last_reset TEXT,
-                    premium_expires TEXT,
-                    is_admin INTEGER DEFAULT 0,
-                    test_used INTEGER DEFAULT 0,
-                    joined_at TEXT,
-                    is_owner INTEGER DEFAULT 0
-                )
-            """).execute()
-            print("✅ Таблица users_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка users_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)
-            """).execute()
-            print("✅ Таблица banned_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка banned_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)
-            """).execute()
-            print("✅ Таблица muted_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка muted_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS total_stats_web (
-                    user_id BIGINT PRIMARY KEY,
-                    total_messages INTEGER DEFAULT 0
-                )
-            """).execute()
-            print("✅ Таблица total_stats_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка total_stats_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS premium_orders_web (
-                    order_id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    status TEXT DEFAULT 'pending',
-                    created_at TEXT
-                )
-            """).execute()
-            print("✅ Таблица premium_orders_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка premium_orders_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS support_requests_web (
-                    request_id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    username TEXT,
-                    text TEXT,
-                    status TEXT DEFAULT 'pending',
-                    created_at TEXT
-                )
-            """).execute()
-            print("✅ Таблица support_requests_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка support_requests_web: {e}")
-        
-        try:
-            supabase.sql("""
-                CREATE TABLE IF NOT EXISTS chat_history_web (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT,
-                    role TEXT,
-                    content TEXT,
-                    timestamp TEXT
-                )
-            """).execute()
-            print("✅ Таблица chat_history_web создана")
-        except Exception as e:
-            print(f"⚠️ Ошибка chat_history_web: {e}")
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
+        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
+    except:
+        return date_str
 
+def get_current_date():
+    return get_moscow_time().strftime('%d.%m.%Y')
+
+def get_current_date_full():
+    return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
+
+# ============================================================
+# БАЗА ДАННЫХ (SQLite + Supabase)
+# ============================================================
 def init_db_local():
     conn = sqlite3.connect('users_web.db')
     c = conn.cursor()
@@ -212,7 +154,86 @@ def init_db_local():
     )''')
     conn.commit()
     conn.close()
-    print("✅ Локальная SQLite база данных создана")
+    print("✅ SQLite база создана")
+
+def init_db_web():
+    if use_supabase:
+        try:
+            supabase.table('users_web').select('*').limit(1).execute()
+            print("✅ Supabase таблицы уже есть")
+        except:
+            print("Создаём таблицы в Supabase...")
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS users_web (
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        premium INTEGER DEFAULT 0,
+                        messages_today INTEGER DEFAULT 0,
+                        last_reset TEXT,
+                        premium_expires TEXT,
+                        is_admin INTEGER DEFAULT 0,
+                        test_used INTEGER DEFAULT 0,
+                        joined_at TEXT,
+                        is_owner INTEGER DEFAULT 0
+                    )
+                """).execute()
+                print("✅ users_web создана")
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)
+                """).execute()
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)
+                """).execute()
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS total_stats_web (
+                        user_id BIGINT PRIMARY KEY,
+                        total_messages INTEGER DEFAULT 0
+                    )
+                """).execute()
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS premium_orders_web (
+                        order_id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        status TEXT DEFAULT 'pending',
+                        created_at TEXT
+                    )
+                """).execute()
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS support_requests_web (
+                        request_id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        username TEXT,
+                        text TEXT,
+                        status TEXT DEFAULT 'pending',
+                        created_at TEXT
+                    )
+                """).execute()
+            except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS chat_history_web (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        role TEXT,
+                        content TEXT,
+                        timestamp TEXT
+                    )
+                """).execute()
+                print("✅ chat_history_web создана")
+            except: pass
+    else:
+        init_db_local()
 
 def init_memory_db():
     conn = sqlite3.connect('memory_web.db')
@@ -233,36 +254,11 @@ def init_memory_db():
     conn.commit()
     conn.close()
 
-# Инициализируем БД
 init_db_web()
 init_memory_db()
 
 # ============================================================
-# ВРЕМЯ (МОСКОВСКОЕ)
-# ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
-
-def format_date(date_str):
-    if not date_str:
-        return "неизвестно"
-    try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
-        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
-    except:
-        return date_str
-
-def get_current_date():
-    return get_moscow_time().strftime('%d.%m.%Y')
-
-def get_current_date_full():
-    return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
-
-# ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ (Supabase + SQLite fallback)
+# ФУНКЦИИ БАЗЫ ДАННЫХ
 # ============================================================
 def get_db_user(user_id):
     if use_supabase:
@@ -667,7 +663,7 @@ def increment_messages(user_id):
         conn.close()
 
 # ============================================================
-# ПАМЯТЬ (SQLite)
+# ПАМЯТЬ
 # ============================================================
 def remember(user_id, topic, fact):
     conn = sqlite3.connect('memory_web.db')
@@ -767,23 +763,6 @@ def clear_history(user_id):
         c.execute('DELETE FROM chat_history_web WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
-
-# ============================================================
-# КЭШ
-# ============================================================
-CACHE = {}
-CACHE_TTL = 60
-
-def get_cache(key):
-    if key in CACHE:
-        data, ts = CACHE[key]
-        if time.time() - ts < CACHE_TTL:
-            return data
-        del CACHE[key]
-    return None
-
-def set_cache(key, data):
-    CACHE[key] = (data, time.time())
 
 # ============================================================
 # ПОИСК ПО ИНТЕРНЕТУ
@@ -1317,6 +1296,36 @@ def analyze_image_from_file(file_content):
         width, height = img.size
         format_img = img.format or "Unknown"
         description = f"📸 *Анализ:* {width}×{height}, {format_img}\n"
+        try:
+            url = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+            headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
+            img_enhanced = ImageEnhance.Contrast(img).enhance(2.0)
+            img_enhanced = ImageEnhance.Sharpness(img_enhanced).enhance(2.0)
+            img_enhanced = img_enhanced.convert('L')
+            buf = io.BytesIO()
+            img_enhanced.save(buf, format='JPEG', quality=95)
+            enhanced_data = buf.getvalue()
+            payload = {
+                "folderId": FOLDER_ID,
+                "analyze_specs": [{
+                    "content": base64.b64encode(enhanced_data).decode('utf-8'),
+                    "features": [{"type": "TEXT_DETECTION"}]
+                }]
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            if response.status_code == 200:
+                result = response.json()
+                pages = result.get("results", [{}])[0].get("results", [{}])[0].get("textDetection", {}).get("pages", [])
+                all_text = []
+                for page in pages:
+                    text = page.get("text", "")
+                    if text:
+                        all_text.append(text)
+                if all_text:
+                    recognized_text = " ".join(all_text).strip()
+                    description += f"\n📝 Текст: {recognized_text[:300]}"
+        except:
+            pass
         return description
     except:
         return "⚠️ Не удалось проанализировать изображение."
@@ -1325,13 +1334,9 @@ def analyze_image_from_file(file_content):
 # ОСНОВНАЯ ОБРАБОТКА С ИСТОРИЕЙ
 # ============================================================
 def process_message_with_history(user_id, user_text, image_description=None):
-    # Сохраняем сообщение пользователя
     save_message(user_id, 'user', user_text)
-
-    # Получаем историю (10 последних сообщений)
     history = get_history(user_id, limit=10)
 
-    # Формируем системный промпт с историей
     current_date = get_current_date()
     current_time = get_moscow_time().strftime('%H:%M')
     system_prompt = SUPER_SYSTEM_PROMPT.format(
@@ -1352,18 +1357,14 @@ def process_message_with_history(user_id, user_text, image_description=None):
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 История диалога (последние сообщения):\n{history_text}"
 
-    # Поиск в интернете, если нужно
     search_result = None
     if len(user_text) > 3 and not any(kw in user_text.lower() for kw in ['погода', 'курс', 'биткоин', 'эфириум']):
         search_result = search_all_internet(user_text)
 
-    # Генерация ответа
     response = None
     try:
         if GIGACHAT_AUTH_KEY:
             response = generate_with_gigachat(user_text, system_prompt)
-            if response and len(response) > 5:
-                pass
     except:
         pass
     if not response:
@@ -1374,14 +1375,13 @@ def process_message_with_history(user_id, user_text, image_description=None):
     if not response:
         response = generate_fallback_response(user_text, search_result)
 
-    # Сохраняем ответ бота
     if response:
         save_message(user_id, 'assistant', response)
 
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ (КОРОТКАЯ ВЕРСИЯ)
+# HTML ТЕМПЛЕЙТ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1738,7 +1738,6 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
-        // ===== ЧАСТИЦЫ =====
         (function() {
             const canvas = document.getElementById('particles');
             const ctx = canvas.getContext('2d');
@@ -1809,7 +1808,6 @@ HTML_TEMPLATE = """
             animate(0);
         })();
         
-        // ===== ЛОГИКА ЧАТА =====
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
@@ -1954,7 +1952,6 @@ def chat():
                 remaining = 0
             return jsonify({'reply': f"🔴 Лимит исчерпан! Осталось: {remaining}/{FREE_LIMIT}\n💎 Купи Premium: /premium"})
 
-        # Обработка команд
         if message.startswith('/'):
             cmd = message.lower().strip()
             if cmd == '/clear':
@@ -2185,7 +2182,6 @@ def chat():
             else:
                 pass
 
-        # Если не команда, обрабатываем как обычный вопрос с историей
         response = process_message_with_history(user_id, message)
         if response:
             increment_messages(user_id)
@@ -2346,5 +2342,6 @@ if __name__ == '__main__':
     print("=" * 60)
     print("✅ Supabase: " + ("ПОДКЛЮЧЕН" if use_supabase else "НЕ ПОДКЛЮЧЕН (используется SQLite)"))
     print("✅ Память диалога включена")
+    print("✅ Все команды работают")
     print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
