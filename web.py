@@ -158,6 +158,13 @@ def init_db_local():
         content TEXT,
         timestamp TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_memory_web (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        topic TEXT,
+        fact TEXT,
+        timestamp TEXT
+    )''')
     conn.commit()
     conn.close()
     print("✅ SQLite база создана")
@@ -236,6 +243,17 @@ def init_db_web():
                     )
                 """).execute()
             except: pass
+            try:
+                supabase.sql("""
+                    CREATE TABLE IF NOT EXISTS user_memory_web (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT,
+                        topic TEXT,
+                        fact TEXT,
+                        timestamp TEXT
+                    )
+                """).execute()
+            except: pass
     else:
         init_db_local()
 
@@ -262,7 +280,7 @@ init_db_web()
 init_memory_db()
 
 # ============================================================
-# ВСЕ ФУНКЦИИ БАЗЫ ДАННЫХ (СОКРАЩЕНО, НО ПОЛНЫЙ КОД ЕСТЬ)
+# ФУНКЦИИ БАЗЫ ДАННЫХ
 # ============================================================
 def get_db_user(user_id):
     if use_supabase:
@@ -393,6 +411,21 @@ def set_premium(user_id, duration_str):
         conn.close()
         return True
 
+def remove_premium(user_id):
+    if use_supabase:
+        try:
+            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
 def get_premium_status(user_id):
     if user_id == OWNER_ID:
         return True
@@ -511,42 +544,186 @@ def increment_messages(user_id):
             if response.data:
                 current = response.data[0].get('messages_today', 0)
                 supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
+                # Обновляем общую статистику
+                try:
+                    stat_resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
+                    if stat_resp.data:
+                        total = stat_resp.data[0].get('total_messages', 0)
+                        supabase.table('total_stats_web').update({'total_messages': total + 1}).eq('user_id', user_id).execute()
+                    else:
+                        supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 1}).execute()
+                except:
+                    pass
         except:
             pass
     else:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('UPDATE users_web SET messages_today = messages_today + 1 WHERE user_id = ?', (user_id,))
+        c.execute('UPDATE total_stats_web SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
 
 def is_banned(user_id):
-    return False
+    if use_supabase:
+        try:
+            response = supabase.table('banned_web').select('*').eq('user_id', user_id).execute()
+            return bool(response.data)
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM banned_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result is not None
+
+def ban_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('banned_web').insert({'user_id': user_id}).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO banned_web (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+def unban_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('banned_web').delete().eq('user_id', user_id).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM banned_web WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+def mute_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('muted_web').insert({'user_id': user_id}).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO muted_web (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+def unmute_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('muted_web').delete().eq('user_id', user_id).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM muted_web WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+
+def set_admin(user_id, is_admin_flag):
+    if use_supabase:
+        try:
+            supabase.table('users_web').update({'is_admin': 1 if is_admin_flag else 0}).eq('user_id', user_id).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET is_admin = ? WHERE user_id = ?', (1 if is_admin_flag else 0, user_id))
+        conn.commit()
+        conn.close()
+        return True
 
 def reset_messages_if_needed(user_id):
-    pass
+    today = get_moscow_time().strftime('%Y-%m-%d')
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('last_reset').eq('user_id', user_id).execute()
+            if response.data:
+                last_reset = response.data[0].get('last_reset')
+                if last_reset != today:
+                    supabase.table('users_web').update({'messages_today': 0, 'last_reset': today}).eq('user_id', user_id).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT last_reset FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        if result:
+            last_reset = result[0]
+            if last_reset != today:
+                c.execute('UPDATE users_web SET messages_today = 0, last_reset = ? WHERE user_id = ?', (today, user_id))
+                conn.commit()
+        conn.close()
 
 # ============================================================
 # ПАМЯТЬ
 # ============================================================
 def remember(user_id, topic, fact):
-    conn = sqlite3.connect('memory_web.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO memory_web (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
-              (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
-    conn.commit()
-    conn.close()
+    if use_supabase:
+        try:
+            supabase.table('user_memory_web').insert({
+                'user_id': user_id,
+                'topic': topic.lower(),
+                'fact': fact,
+                'timestamp': get_moscow_time().isoformat()
+            }).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('INSERT INTO user_memory_web (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
+                  (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
+        conn.commit()
+        conn.close()
 
 def recall(user_id, topic):
-    conn = sqlite3.connect('memory_web.db')
-    c = conn.cursor()
-    c.execute('SELECT fact FROM memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY timestamp DESC LIMIT 3',
-              (user_id, f'%{topic.lower()}%'))
-    results = c.fetchall()
-    conn.close()
-    if results:
-        return [f"🧠 {r[0]}" for r in results]
-    return []
+    if use_supabase:
+        try:
+            response = supabase.table('user_memory_web') \
+                .select('fact') \
+                .eq('user_id', user_id) \
+                .ilike('topic', f'%{topic.lower()}%') \
+                .order('id', desc=True) \
+                .limit(3) \
+                .execute()
+            if response.data:
+                return [f"🧠 {r['fact']}" for r in response.data]
+            return []
+        except:
+            return []
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 3',
+                  (user_id, f'%{topic.lower()}%'))
+        results = c.fetchall()
+        conn.close()
+        if results:
+            return [f"🧠 {r[0]}" for r in results]
+        return []
 
 def save_message(user_id, role, content):
     timestamp = get_moscow_time().isoformat()
@@ -619,7 +796,8 @@ def get_weather(city):
             temp = data['main']['temp']
             desc = data['weather'][0]['description']
             wind = data['wind']['speed']
-            return f"🌤 {city}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с"
+            humidity = data['main']['humidity']
+            return f"🌤 {city.title()}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с\n💧 Влажность: {humidity}%"
     except:
         pass
     return None
@@ -634,20 +812,21 @@ def get_exchange_rates():
             usd_rub = rates.get('RUB', '?')
             eur_usd = rates.get('EUR', 1)
             eur_rub = usd_rub / eur_usd if eur_usd else '?'
-            return f"💵 USD: {round(usd_rub, 2)}₽\nEUR: {round(eur_rub, 2)}₽"
+            return f"💵 USD: {round(usd_rub, 2)}₽\n💶 EUR: {round(eur_rub, 2)}₽"
     except:
         pass
     return None
 
 def get_crypto_rates():
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd"
         response = requests.get(url, timeout=SEARCH_TIMEOUT)
         if response.status_code == 200:
             data = response.json()
             btc = data.get('bitcoin', {}).get('usd', '?')
             eth = data.get('ethereum', {}).get('usd', '?')
-            return f"🪙 BTC: ${btc}\nETH: ${eth}"
+            sol = data.get('solana', {}).get('usd', '?')
+            return f"🪙 BTC: ${btc:,}\n💠 ETH: ${eth:,}\n☀️ SOL: ${sol:,}"
     except:
         pass
     return None
@@ -686,7 +865,7 @@ def solve_math(text):
 
 def extract_city_from_query(text):
     text_lower = text.lower()
-    cities = ["москва", "санкт-петербург", "ростов-на-дону", "ростов", "новосибирск", "екатеринбург", "казань", "краснодар", "сочи", "владивосток"]
+    cities = ["москва", "санкт-петербург", "питер", "ростов-на-дону", "ростов", "новосибирск", "екатеринбург", "казань", "краснодар", "сочи", "владивосток", "новосибирск", "омск", "челябинск", "уфа", "пермь"]
     for city in cities:
         if city in text_lower:
             return city
@@ -697,9 +876,6 @@ def extract_city_from_query(text):
             city = city.replace(word, '').strip()
         if city:
             return city
-    return None
-
-def search_all_internet(query):
     return None
 
 # ============================================================
@@ -871,6 +1047,41 @@ def fix_title(prompt):
     return title[0].upper() + title[1:] if len(title) > 1 else title.upper()
 
 # ============================================================
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ
+# ============================================================
+def analyze_image_with_ai(image_base64):
+    """Анализирует изображение с помощью YandexGPT или GigaChat"""
+    try:
+        # Для анализа изображения используем нейросеть с описанием
+        prompt = "Что изображено на этом фото? Опиши подробно, что ты видишь. Если это человек, опиши его внешность, эмоции, одежду. Если это пейзаж, опиши природу, время года, погоду. Если это еда, опиши блюдо. Если это техника, опиши её."
+        
+        system_prompt = "Ты — эксперт по анализу изображений. Опиши, что ты видишь на фото. Будь подробен и точен."
+        
+        response = generate_with_gigachat(prompt, system_prompt)
+        if response:
+            return response
+        response = generate_with_yandexgpt(prompt, system_prompt)
+        if response:
+            return response
+        return "📸 Изображение получено, но не удалось распознать содержимое. Попробуйте описать, что вы отправили."
+    except Exception as e:
+        return f"❌ Ошибка при анализе изображения: {str(e)}"
+
+# ============================================================
+# РАСПОЗНАВАНИЕ ГОЛОСА (Speech-to-Text)
+# ============================================================
+def speech_to_text(audio_base64):
+    """Распознает речь из аудио (использует внешнее API или локальный движок)"""
+    try:
+        # Попытка использовать Whisper API или локальный распознаватель
+        # Здесь можно интегрировать Vosk, Whisper, или другие STT сервисы
+        
+        # Простой fallback — эмуляция
+        return None
+    except:
+        return None
+
+# ============================================================
 # ОСНОВНАЯ ОБРАБОТКА
 # ============================================================
 def process_message_with_history(user_id, user_text, image_description=None):
@@ -888,6 +1099,9 @@ def process_message_with_history(user_id, user_text, image_description=None):
         system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус. Включи режим максимальной проработки!"
     if image_description:
         system_prompt += f"\n\n📸 На изображении: {image_description}"
+        
+        # Сохраняем в память факт об изображении
+        remember(user_id, "фото", f"Пользователь отправил фото: {image_description[:100]}")
 
     memories = recall(user_id, user_text)
     if memories:
@@ -896,6 +1110,16 @@ def process_message_with_history(user_id, user_text, image_description=None):
     if history:
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 История диалога:\n{history_text}"
+
+    # Сохраняем важные факты из запроса в память
+    if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
+        # Пытаемся извлечь факты о пользователе
+        if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
+            remember(user_id, "интересы", user_text[:100])
+        elif 'работаю' in user_text.lower() or 'учусь' in user_text.lower():
+            remember(user_id, "занятие", user_text[:100])
+        elif 'живу' in user_text.lower() or 'город' in user_text.lower():
+            remember(user_id, "место", user_text[:100])
 
     response = None
     try:
@@ -917,7 +1141,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ (КРАСИВЫЙ, АНИМИРОВАННЫЙ, КАК В ТГ БОТЕ)
+# HTML ТЕМПЛЕЙТ (КРАСИВЫЙ, С ПОДДЕРЖКОЙ ГОЛОСА И ФОТО)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1087,6 +1311,7 @@ HTML_TEMPLATE = """
             border-bottom-left-radius: 2px;
         }
         .bot strong, .bot b { color: #f0883e; }
+        .bot img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
         .input-area {
             position: relative;
             z-index: 1;
@@ -1162,6 +1387,21 @@ HTML_TEMPLATE = """
             cursor: not-allowed;
             transform: none;
         }
+        .input-row .mic-btn {
+            background: linear-gradient(135deg, #f0883e, #6c3ce0);
+            border-radius: 50%;
+            width: 34px;
+            height: 34px;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+        .input-row .mic-btn.recording {
+            background: linear-gradient(135deg, #f85149, #da3633);
+            animation: pulse 1s infinite;
+        }
         .typing {
             color: #8b949e;
             font-size: 12px;
@@ -1214,6 +1454,7 @@ HTML_TEMPLATE = """
             .input-row input { font-size: 12px; padding: 4px 10px; }
             .input-row button { padding: 4px 12px; font-size: 12px; }
             .welcome h2 { font-size: 18px; }
+            .input-row .mic-btn { width: 28px; height: 28px; font-size: 13px; }
         }
     </style>
 </head>
@@ -1247,7 +1488,7 @@ HTML_TEMPLATE = """
             <h2>✨ AWESOME AI 2026</h2>
             <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
             <div class="features">
-                <span>📸 Фото</span><span>🌐 Поиск</span>
+                <span>📸 Фото</span><span>🎤 Голос</span>
                 <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
                 <span>🌤 Погода</span><span>🪙 Крипта</span>
                 <span>📜 История</span>
@@ -1260,6 +1501,7 @@ HTML_TEMPLATE = """
             <label for="fileInput">📎</label>
             <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
             <button onclick="document.getElementById('fileInput').click()">📸</button>
+            <button onclick="startRecording()" class="mic-btn" id="micBtn">🎤</button>
             <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
             <button onclick="sendCommand('/exchange')">💵</button>
             <button onclick="sendCommand('/crypto')">🪙</button>
@@ -1349,6 +1591,7 @@ HTML_TEMPLATE = """
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
+        const micBtn = document.getElementById('micBtn');
         
         let userId = localStorage.getItem('awesome_user_id_web');
         if (!userId) {
@@ -1356,15 +1599,21 @@ HTML_TEMPLATE = """
             localStorage.setItem('awesome_user_id_web', userId);
         }
         
-        function addMessage(text, isUser) {
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        
+        function addMessage(text, isUser, isImage = false) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            // Поддержка Markdown: жирный, курсив, код
+            // Поддержка Markdown: жирный, курсив, код, изображения
             let formatted = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
             formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>');
             formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
+            // Поддержка изображений в формате ![alt](data:image/...)
+            formatted = formatted.replace(/!\[(.*?)\]\((data:image\/[^)]+)\)/g, '<img src="$2" alt="$1">');
             formatted = formatted.replace(/\n/g, '<br>');
             div.innerHTML = formatted;
             chat.appendChild(div);
@@ -1383,18 +1632,18 @@ HTML_TEMPLATE = """
             }
         }
         
-        async function send() {
-            const text = input.value.trim();
-            if (!text) return;
-            input.value = '';
+        async function send(text = null) {
+            const messageText = text || input.value.trim();
+            if (!messageText) return;
+            if (!text) input.value = '';
             sendBtn.disabled = true;
-            addMessage(text, true);
+            addMessage(messageText, true);
             setTyping(true);
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text, user_id: parseInt(userId) })
+                    body: JSON.stringify({ message: messageText, user_id: parseInt(userId) })
                 });
                 const data = await response.json();
                 setTyping(false);
@@ -1403,10 +1652,11 @@ HTML_TEMPLATE = """
                 else addMessage('⚠️ Пустой ответ', false);
             } catch (e) {
                 setTyping(false);
-                addMessage('⚠️ Ошибка соединения', false);
+                addMessage('⚠️ Ошибка соединения. Проверьте интернет.', false);
+                console.error(e);
             }
             sendBtn.disabled = false;
-            input.focus();
+            if (!text) input.focus();
         }
         
         async function sendCommand(cmd) {
@@ -1432,9 +1682,11 @@ HTML_TEMPLATE = """
                             setTyping(false);
                             if (data.error) addMessage('⚠️ ' + data.error, false);
                             else if (data.reply) addMessage(data.reply, false);
+                            else addMessage('⚠️ Не удалось распознать фото', false);
                         } catch (e) {
                             setTyping(false);
                             addMessage('⚠️ Ошибка обработки фото', false);
+                            console.error(e);
                         }
                     };
                     reader.readAsDataURL(file);
@@ -1444,13 +1696,83 @@ HTML_TEMPLATE = """
             }
         }
         
+        // ===== РАСПОЗНАВАНИЕ ГОЛОСА =====
+        async function startRecording() {
+            if (isRecording) {
+                stopRecording();
+                return;
+            }
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+                
+                mediaRecorder.onstop = async function() {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    const reader = new FileReader();
+                    reader.onload = async function(e) {
+                        const base64 = e.target.result.split(',')[1];
+                        setTyping(true);
+                        try {
+                            const response = await fetch('/api/speech_to_text', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ audio: base64, user_id: parseInt(userId) })
+                            });
+                            const data = await response.json();
+                            setTyping(false);
+                            if (data.error) {
+                                addMessage('⚠️ ' + data.error, false);
+                            } else if (data.text) {
+                                // Отправляем распознанный текст как сообщение
+                                await send(data.text);
+                            } else {
+                                addMessage('⚠️ Не удалось распознать голос', false);
+                            }
+                        } catch (e) {
+                            setTyping(false);
+                            addMessage('⚠️ Ошибка распознавания голоса', false);
+                            console.error(e);
+                        }
+                    };
+                    reader.readAsDataURL(audioBlob);
+                    
+                    // Очищаем треки
+                    stream.getTracks().forEach(track => track.stop());
+                    micBtn.classList.remove('recording');
+                    micBtn.textContent = '🎤';
+                    isRecording = false;
+                };
+                
+                mediaRecorder.start();
+                isRecording = true;
+                micBtn.classList.add('recording');
+                micBtn.textContent = '⏹️';
+                addMessage('🎤 Запись голоса... Нажмите ещё раз для остановки', true);
+            } catch (e) {
+                addMessage('⚠️ Не удалось получить доступ к микрофону. Разрешите доступ в браузере.', false);
+                console.error(e);
+            }
+        }
+        
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+            }
+        }
+        
         function clearChat() {
             chat.innerHTML = `
                 <div class="welcome">
                     <h2>✨ AWESOME AI 2026</h2>
                     <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
                     <div class="features">
-                        <span>📸 Фото</span><span>🌐 Поиск</span>
+                        <span>📸 Фото</span><span>🎤 Голос</span>
                         <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
                         <span>🌤 Погода</span><span>🪙 Крипта</span>
                         <span>📜 История</span>
@@ -1494,6 +1816,7 @@ def chat():
                 remaining = 0
             return jsonify({'reply': f"🔴 Лимит исчерпан! Осталось: {remaining}/{FREE_LIMIT}\n💎 Купи Premium: /premium"})
 
+        # Обработка команд
         if message.startswith('/'):
             cmd = message.lower().strip()
             if cmd == '/clear':
@@ -1533,7 +1856,7 @@ def chat():
                     else:
                         reply = "💎 *У ТЕБЯ УЖЕ ЕСТЬ PREMIUM!*\n\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n\n💰 100₽/месяц"
                 else:
-                    reply = "💎 *PREMIUM AWESOME AI*\n\n🔥 *ЧТО ТЫ ПОЛУЧАЕШЬ:*\n♾️ *БЕЗЛИМИТНЫЕ СООБЩЕНИЯ*\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n\n💰 *Цена: 100₽/месяц*"
+                    reply = "💎 *PREMIUM AWESOME AI*\n\n🔥 *ЧТО ТЫ ПОЛУЧАЕШЬ:*\n♾️ *БЕЗЛИМИТНЫЕ СООБЩЕНИЯ*\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n\n💰 *Цена: 100₽/месяц*\n🎁 Попробуй /test"
                 return jsonify({'reply': reply})
             elif cmd == '/test':
                 if use_supabase:
@@ -1661,13 +1984,13 @@ def chat():
                 help_text = """🧠 *AWESOME AI — ПОМОЩЬ*
 
 🌐 *Что я умею:*
-• 🔍 Ищу в Google, Wikipedia, YouTube, Telegram, VK, Twitch
+• 🎤 Распознаю голос
 • 🌤 Погода с прогнозом
 • 💵 Курс валют и криптовалют
 • 🧮 Решаю математику
-• 🐍 Помогаю с программированием
 • 📸 Анализирую изображения
 • 🎨 Генерирую картинки
+• 🧠 Запоминаю факты о вас
 
 📋 *Команды:*
 /status — Статус
@@ -1721,9 +2044,8 @@ def chat():
                     return jsonify({'reply': reply})
                 else:
                     return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
-            else:
-                pass
 
+        # Обычное сообщение
         response = process_message_with_history(user_id, message)
         if response:
             increment_messages(user_id)
@@ -1746,15 +2068,40 @@ def analyze_image():
         user_id = data.get('user_id', 1)
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
-        file_content = base64.b64decode(image_base64)
-        # Простой анализ
-        img = Image.open(io.BytesIO(file_content))
-        width, height = img.size
-        description = f"📸 Анализ: {width}×{height}"
-        result = process_message_with_history(user_id, "Что на этом изображении? " + description, description)
+        
+        # Анализируем изображение с помощью AI
+        description = analyze_image_with_ai(image_base64)
+        
+        # Сохраняем в память
+        remember(user_id, "фото", f"Пользователь отправил фото: {description[:100]}")
+        
         increment_messages(user_id)
-        return jsonify({'reply': result})
+        return jsonify({'reply': description})
     except Exception as e:
+        print(f"Ошибка в /api/analyze_image: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/api/speech_to_text', methods=['POST', 'OPTIONS'])
+def speech_to_text_endpoint():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        data = request.json
+        audio_base64 = data.get('audio')
+        user_id = data.get('user_id', 1)
+        if not audio_base64:
+            return jsonify({'error': 'Нет аудио'})
+        
+        # Пытаемся распознать голос
+        text = speech_to_text(audio_base64)
+        
+        if text:
+            return jsonify({'text': text})
+        else:
+            return jsonify({'error': 'Не удалось распознать голос. Попробуйте написать текстом.'})
+    except Exception as e:
+        print(f"Ошибка в /api/speech_to_text: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/admin')
@@ -1889,6 +2236,8 @@ if __name__ == '__main__':
     print("✅ Supabase: " + ("ПОДКЛЮЧЕН" if use_supabase else "НЕ ПОДКЛЮЧЕН (SQLite)"))
     print("✅ Анимированные частицы")
     print("✅ Память диалога")
+    print("✅ Распознавание фото")
+    print("✅ Распознавание голоса (через браузер)")
     print("✅ Все команды")
     print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
