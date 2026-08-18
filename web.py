@@ -33,7 +33,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # ============================================================
-# CORS - ПРАВИЛЬНАЯ НАСТРОЙКА (ВАЖНО!)
+# CORS - ПРАВИЛЬНАЯ НАСТРОЙКА
 # ============================================================
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -1383,7 +1383,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
         try:
             response = generate_with_yandexgpt(user_text, system_prompt)
         except:
-            pass
+        pass
     if not response:
         response = generate_fallback_response(user_text, search_result)
 
@@ -1393,7 +1393,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ (ИСПРАВЛЕННЫЙ — ОТПРАВЛЯЕТ СООБЩЕНИЯ)
+# HTML ТЕМПЛЕЙТ (УПРОЩЁННЫЙ, РАБОЧИЙ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1412,142 +1412,52 @@ HTML_TEMPLATE = """
             display: flex;
             flex-direction: column;
             overflow: hidden;
-            position: relative;
-        }
-        #particles {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: 0;
-            pointer-events: none;
-            opacity: 0.4;
-        }
-        .glow {
-            position: fixed;
-            border-radius: 50%;
-            filter: blur(100px);
-            opacity: 0.08;
-            z-index: 0;
-            pointer-events: none;
-            animation: floatGlow 25s ease-in-out infinite;
-        }
-        .glow-1 { width: 500px; height: 500px; top: -150px; right: -150px; background: #6c3ce0; }
-        .glow-2 { width: 400px; height: 400px; bottom: -100px; left: -100px; background: #f0883e; animation-delay: 7s; }
-        .glow-3 { width: 300px; height: 300px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
-        @keyframes floatGlow {
-            0%,100% { transform: translate(0,0) scale(1); }
-            33% { transform: translate(80px,-50px) scale(1.2); }
-            66% { transform: translate(-50px,80px) scale(0.8); }
         }
         .header {
-            position: relative;
-            z-index: 1;
-            background: rgba(10, 14, 23, 0.85);
-            backdrop-filter: blur(20px);
-            padding: 8px 16px;
-            border-bottom: 1px solid rgba(255,255,255,0.04);
+            background: rgba(10, 14, 23, 0.95);
+            padding: 12px 20px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            align-items: center;
             flex-shrink: 0;
-            flex-wrap: wrap;
-            gap: 4px;
         }
         .logo {
-            font-size: 18px;
+            font-size: 20px;
             font-weight: 900;
-            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
-            background-size: 300% 300%;
+            background: linear-gradient(135deg, #58a6ff, #f0883e);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            animation: gradientShift 6s ease-in-out infinite;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        @keyframes gradientShift {
-            0%,100% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
         }
         .badge {
-            background: rgba(46, 160, 67, 0.15);
-            border: 1px solid rgba(46, 160, 67, 0.25);
+            font-size: 10px;
             color: #2ea043;
-            font-size: 8px;
-            font-weight: 600;
-            padding: 2px 10px;
+            border: 1px solid rgba(46, 160, 67, 0.3);
+            padding: 2px 12px;
             border-radius: 12px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
         }
-        .badge .dot {
-            width: 5px;
-            height: 5px;
-            border-radius: 50%;
-            background: #2ea043;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0%,100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.3; transform: scale(0.7); }
-        }
-        .menu {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-        }
-        .menu button {
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.05);
-            color: #8b949e;
-            padding: 3px 10px;
-            border-radius: 14px;
-            font-size: 9px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.25s ease;
-            will-change: transform;
-        }
-        .menu button:hover {
-            background: rgba(88,166,255,0.1);
-            border-color: rgba(88,166,255,0.2);
-            color: #58a6ff;
-            transform: translateY(-2px);
-        }
-        .menu .premium:hover { background: rgba(240,136,62,0.1); border-color: rgba(240,136,62,0.2); color: #f0883e; }
-        .menu .danger:hover { background: rgba(248,81,73,0.1); border-color: rgba(248,81,73,0.2); color: #f85149; }
-        .menu .admin { background: rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.1); color: #f85149; }
-        .menu .admin:hover { background: rgba(248,81,73,0.12); border-color: rgba(248,81,73,0.2); }
         .chat {
-            position: relative;
-            z-index: 1;
             flex: 1;
             overflow-y: auto;
-            padding: 12px 16px;
+            padding: 16px 20px;
             display: flex;
             flex-direction: column;
             gap: 8px;
-            will-change: transform;
         }
-        .chat::-webkit-scrollbar { width: 2px; }
-        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; }
+        .chat::-webkit-scrollbar { width: 3px; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.05); border-radius: 10px; }
         .message {
             max-width: 80%;
-            padding: 8px 14px;
+            padding: 8px 16px;
             border-radius: 14px;
             line-height: 1.6;
             word-wrap: break-word;
-            white-space: pre-wrap;
             font-size: 13px;
-            animation: slideUp 0.2s ease-out;
-            will-change: transform, opacity;
+            animation: fadeIn 0.2s ease;
         }
-        @keyframes slideUp {
-            0% { opacity: 0; transform: translateY(10px) scale(0.97); }
-            100% { opacity: 1; transform: translateY(0) scale(1); }
+        @keyframes fadeIn {
+            0% { opacity: 0; transform: translateY(8px); }
+            100% { opacity: 1; transform: translateY(0); }
         }
         .user {
             align-self: flex-end;
@@ -1557,68 +1467,42 @@ HTML_TEMPLATE = """
         }
         .bot {
             align-self: flex-start;
-            background: rgba(22,27,34,0.85);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255,255,255,0.04);
+            background: rgba(22,27,34,0.9);
+            border: 1px solid rgba(255,255,255,0.05);
             border-bottom-left-radius: 2px;
         }
         .bot strong, .bot b { color: #f0883e; }
+        .typing {
+            color: #8b949e;
+            font-size: 12px;
+            padding: 4px 16px;
+            align-self: flex-start;
+        }
         .input-area {
-            position: relative;
-            z-index: 1;
-            padding: 8px 12px 10px;
-            border-top: 1px solid rgba(255,255,255,0.04);
-            background: rgba(10, 14, 23, 0.85);
-            backdrop-filter: blur(20px);
+            padding: 10px 16px 14px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            background: rgba(10, 14, 23, 0.95);
             flex-shrink: 0;
         }
-        .tools {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-            margin-bottom: 4px;
-        }
-        .tools button, .tools label {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.04);
-            color: #6e7681;
-            padding: 2px 10px;
-            border-radius: 14px;
-            font-size: 9px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .tools button:hover, .tools label:hover {
-            background: rgba(255,255,255,0.06);
-            border-color: rgba(255,255,255,0.08);
-            color: #e6edf3;
-        }
-        .tools input[type="file"] { display: none; }
         .input-row {
             display: flex;
-            gap: 6px;
-            align-items: center;
+            gap: 8px;
         }
         .input-row input {
             flex: 1;
-            padding: 6px 14px;
+            padding: 8px 16px;
             border-radius: 20px;
             border: 1px solid rgba(255,255,255,0.06);
             background: rgba(22,27,34,0.6);
             color: #e6edf3;
             font-size: 13px;
             outline: none;
-            transition: border 0.3s ease;
         }
         .input-row input:focus {
             border-color: #58a6ff;
-            box-shadow: 0 0 30px rgba(88,166,255,0.03);
-        }
-        .input-row input::placeholder {
-            color: #484f58;
         }
         .input-row button {
-            padding: 6px 18px;
+            padding: 8px 20px;
             border-radius: 20px;
             border: none;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
@@ -1626,208 +1510,65 @@ HTML_TEMPLATE = """
             font-weight: 600;
             font-size: 13px;
             cursor: pointer;
-            transition: transform 0.2s ease;
-            white-space: nowrap;
         }
         .input-row button:hover {
             transform: scale(1.02);
-            box-shadow: 0 4px 25px rgba(88,166,255,0.1);
         }
         .input-row button:disabled {
             opacity: 0.4;
             cursor: not-allowed;
-            transform: none;
-        }
-        .typing {
-            color: #8b949e;
-            font-size: 12px;
-            padding: 4px 16px;
-            align-self: flex-start;
-            animation: pulse 1.5s infinite;
         }
         .welcome {
             text-align: center;
-            padding: 30px 20px;
+            padding: 40px 20px;
             color: #8b949e;
         }
         .welcome h2 {
-            color: #e6edf3;
+            font-size: 24px;
             margin-bottom: 4px;
-            font-size: 22px;
-            font-weight: 800;
             background: linear-gradient(135deg, #58a6ff, #f0883e);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
-        .welcome p { font-size: 13px; opacity: 0.6; }
-        .welcome .features {
-            display: flex;
-            gap: 8px;
-            justify-content: center;
-            margin-top: 12px;
-            flex-wrap: wrap;
-        }
-        .welcome .features span {
-            background: rgba(255,255,255,0.03);
-            padding: 3px 12px;
-            border-radius: 16px;
-            font-size: 10px;
-            border: 1px solid rgba(255,255,255,0.04);
-            color: #6e7681;
-            transition: all 0.2s ease;
-        }
-        .welcome .features span:hover {
-            background: rgba(255,255,255,0.06);
-            color: #e6edf3;
-        }
+        .welcome p { opacity: 0.6; font-size: 13px; }
         @media (max-width: 640px) {
-            .header { padding: 4px 10px; }
-            .logo { font-size: 15px; }
-            .menu button { font-size: 7px; padding: 2px 6px; }
-            .message { max-width: 92%; font-size: 12px; padding: 6px 10px; }
-            .chat { padding: 8px 10px; }
-            .input-area { padding: 4px 8px 8px; }
-            .input-row input { font-size: 12px; padding: 4px 10px; }
-            .input-row button { padding: 4px 12px; font-size: 12px; }
-            .welcome h2 { font-size: 18px; }
+            .message { max-width: 92%; font-size: 12px; }
+            .logo { font-size: 16px; }
+            .header { padding: 8px 12px; }
+            .input-area { padding: 6px 10px 10px; }
+            .input-row input { font-size: 12px; padding: 6px 12px; }
         }
     </style>
 </head>
 <body>
-    <canvas id="particles"></canvas>
-    <div class="glow glow-1"></div>
-    <div class="glow glow-2"></div>
-    <div class="glow glow-3"></div>
-    
-    <header class="header">
+    <div class="header">
         <span class="logo">🧠 AWESOME AI</span>
-        <div style="display:flex;align-items:center;gap:4px;">
-            <span class="badge"><span class="dot"></span> ONLINE</span>
-            <div class="menu">
-                <button onclick="sendCommand('/status')">📊</button>
-                <button class="premium" onclick="sendCommand('/premium')">💎</button>
-                <button onclick="sendCommand('/test')">🎁</button>
-                <button onclick="sendCommand('/profile')">👤</button>
-                <button onclick="sendCommand('/stats')">📈</button>
-                <button onclick="sendCommand('/help')">❓</button>
-                <button class="danger" onclick="clearChat()">🧹</button>
-                <button onclick="sendCommand('/clear')">🗑️</button>
-                <button onclick="sendCommand('/history')">📜</button>
-                <button class="admin" onclick="window.open('/admin?user_id=' + userId, '_blank')">👑</button>
-            </div>
-        </div>
-    </header>
+        <span class="badge">● ONLINE</span>
+    </div>
     
     <div class="chat" id="chat">
         <div class="welcome">
             <h2>✨ AWESOME AI 2026</h2>
-            <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
-            <div class="features">
-                <span>📸 Фото</span><span>🌐 Поиск</span>
-                <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
-                <span>🌤 Погода</span><span>🪙 Крипта</span>
-                <span>📜 История</span>
-            </div>
+            <p>Задай вопрос — я отвечу за секунды</p>
         </div>
     </div>
     
     <div class="input-area">
-        <div class="tools">
-            <label for="fileInput">📎</label>
-            <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
-            <button onclick="document.getElementById('fileInput').click()">📸</button>
-            <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
-            <button onclick="sendCommand('/exchange')">💵</button>
-            <button onclick="sendCommand('/crypto')">🪙</button>
-            <button onclick="sendCommand('/draw '+prompt('🎨 Описание картинки?'))">🎨</button>
-            <button onclick="sendCommand('/history')">📜</button>
-            <button onclick="sendCommand('/clear')">🗑️</button>
-        </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши..." onkeydown="if(event.key==='Enter') send()" autofocus>
+            <input id="input" placeholder="Напиши что-нибудь..." onkeydown="if(event.key==='Enter') send()" autofocus>
             <button id="sendBtn" onclick="send()">➤</button>
         </div>
     </div>
-    
+
     <script>
-        (function() {
-            const canvas = document.getElementById('particles');
-            const ctx = canvas.getContext('2d');
-            let particles = [];
-            const count = 35;
-            let animFrame;
-            
-            function resize() {
-                canvas.width = window.innerWidth;
-                canvas.height = window.innerHeight;
-            }
-            window.addEventListener('resize', resize);
-            resize();
-            
-            class Particle {
-                constructor() {
-                    this.x = Math.random() * canvas.width;
-                    this.y = Math.random() * canvas.height;
-                    this.size = Math.random() * 2 + 0.5;
-                    this.speedX = (Math.random() - 0.5) * 0.25;
-                    this.speedY = (Math.random() - 0.5) * 0.25;
-                    this.opacity = Math.random() * 0.2 + 0.05;
-                }
-                update() {
-                    this.x += this.speedX;
-                    this.y += this.speedY;
-                    if (this.x < 0 || this.x > canvas.width) this.speedX *= -1;
-                    if (this.y < 0 || this.y > canvas.height) this.speedY *= -1;
-                }
-                draw() {
-                    ctx.beginPath();
-                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-                    ctx.fillStyle = `rgba(136, 192, 255, ${this.opacity})`;
-                    ctx.fill();
-                }
-            }
-            
-            for (let i = 0; i < count; i++) particles.push(new Particle());
-            
-            let lastTime = 0;
-            const fps = 30;
-            const interval = 1000 / fps;
-            
-            function animate(time) {
-                if (time - lastTime >= interval) {
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    particles.forEach(p => { p.update(); p.draw(); });
-                    
-                    for (let i = 0; i < particles.length; i++) {
-                        for (let j = i + 1; j < particles.length; j++) {
-                            const dx = particles[i].x - particles[j].x;
-                            const dy = particles[i].y - particles[j].y;
-                            const dist = Math.sqrt(dx * dx + dy * dy);
-                            if (dist < 120) {
-                                ctx.beginPath();
-                                ctx.strokeStyle = `rgba(136, 192, 255, ${0.02 * (1 - dist / 120)})`;
-                                ctx.lineWidth = 0.3;
-                                ctx.moveTo(particles[i].x, particles[i].y);
-                                ctx.lineTo(particles[j].x, particles[j].y);
-                                ctx.stroke();
-                            }
-                        }
-                    }
-                    lastTime = time;
-                }
-                animFrame = requestAnimationFrame(animate);
-            }
-            animate(0);
-        })();
-        
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         
-        let userId = localStorage.getItem('awesome_user_id_web');
+        let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
             userId = Date.now() + Math.floor(Math.random() * 1000);
-            localStorage.setItem('awesome_user_id_web', userId);
+            localStorage.setItem('awesome_user_id', userId);
         }
         
         function addMessage(text, isUser) {
@@ -1835,11 +1576,7 @@ HTML_TEMPLATE = """
             if (welcome) welcome.remove();
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            let formatted = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>');
-            formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
-            formatted = formatted.replace(/\n/g, '<br>');
-            div.innerHTML = formatted;
+            div.textContent = text;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
         }
@@ -1850,7 +1587,7 @@ HTML_TEMPLATE = """
             if (show) {
                 const div = document.createElement('div');
                 div.className = 'typing';
-                div.textContent = '🧠 AWESOME AI печатает...';
+                div.textContent = '🧠 Печатает...';
                 chat.appendChild(div);
                 chat.scrollTop = chat.scrollHeight;
             }
@@ -1859,18 +1596,22 @@ HTML_TEMPLATE = """
         async function send() {
             const text = input.value.trim();
             if (!text) return;
+            
             input.value = '';
             sendBtn.disabled = true;
             addMessage(text, true);
             setTyping(true);
+            
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text, user_id: parseInt(userId) })
                 });
+                
                 const data = await response.json();
                 setTyping(false);
+                
                 if (data.error) {
                     addMessage('⚠️ ' + data.error, false);
                 } else if (data.reply) {
@@ -1880,65 +1621,13 @@ HTML_TEMPLATE = """
                 }
             } catch (e) {
                 setTyping(false);
-                addMessage('⚠️ Ошибка соединения: ' + e.message, false);
-                console.error('Fetch error:', e);
+                addMessage('⚠️ Ошибка соединения', false);
+                console.error(e);
             }
+            
             sendBtn.disabled = false;
             input.focus();
         }
-        
-        async function sendCommand(cmd) {
-            input.value = cmd;
-            await send();
-        }
-        
-        function handleFiles(files) {
-            for (const file of files) {
-                if (file.type.startsWith('image/')) {
-                    const reader = new FileReader();
-                    reader.onload = async function(e) {
-                        const base64 = e.target.result.split(',')[1];
-                        addMessage('📸 Отправка фото...', true);
-                        setTyping(true);
-                        try {
-                            const response = await fetch('/api/analyze_image', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ image: base64, user_id: parseInt(userId) })
-                            });
-                            const data = await response.json();
-                            setTyping(false);
-                            if (data.error) addMessage('⚠️ ' + data.error, false);
-                            else if (data.reply) addMessage(data.reply, false);
-                        } catch (e) {
-                            setTyping(false);
-                            addMessage('⚠️ Ошибка обработки фото: ' + e.message, false);
-                            console.error('Image error:', e);
-                        }
-                    };
-                    reader.readAsDataURL(file);
-                } else {
-                    addMessage('📎 ' + file.name + ' (не изображение)', true);
-                }
-            }
-        }
-        
-        function clearChat() {
-            chat.innerHTML = `
-                <div class="welcome">
-                    <h2>✨ AWESOME AI 2026</h2>
-                    <p>Спрашивай что угодно — я отвечу, решу, поищу</p>
-                    <div class="features">
-                        <span>📸 Фото</span><span>🌐 Поиск</span>
-                        <span>💵 Курсы</span><span>🧮 Математика</span><span>🎨 Рисование</span>
-                        <span>🌤 Погода</span><span>🪙 Крипта</span>
-                        <span>📜 История</span>
-                    </div>
-                </div>
-            `;
-        }
-        
-        document.addEventListener('DOMContentLoaded', () => input.focus());
     </script>
 </body>
 </html>
