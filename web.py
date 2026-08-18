@@ -20,14 +20,14 @@ from dotenv import load_dotenv
 
 from bs4 import BeautifulSoup
 import requests
-from PIL import Image, ImageEnhance, ImageFilter
-import speech_recognition as sr
+from PIL import Image
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Для Supabase
 from supabase import create_client, Client
 
+# Отключаем предупреждения SSL (для GigaChat)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
@@ -70,6 +70,30 @@ except Exception as e:
     use_supabase = False
 
 # ============================================================
+# ВРЕМЯ (МОСКОВСКОЕ)
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+def format_date(date_str):
+    if not date_str:
+        return "неизвестно"
+    try:
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
+        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
+    except:
+        return date_str
+
+def get_current_date():
+    return get_moscow_time().strftime('%d.%m.%Y')
+
+def get_current_date_full():
+    return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
+
+# ============================================================
 # ИНИЦИАЛИЗАЦИЯ ТАБЛИЦ В SUPABASE (с суффиксом _web)
 # ============================================================
 def init_db_web():
@@ -78,7 +102,6 @@ def init_db_web():
         return
 
     try:
-        # Проверяем наличие таблиц, создаём при необходимости
         supabase.table('users_web').select('*').limit(1).execute()
         print("✅ Таблицы уже существуют")
     except Exception as e:
@@ -139,7 +162,6 @@ def init_db_web():
                 )
             """).execute()
         except: pass
-        # НОВАЯ ТАБЛИЦА ДЛЯ ИСТОРИИ ДИАЛОГОВ
         try:
             supabase.sql("""
                 CREATE TABLE IF NOT EXISTS chat_history_web (
@@ -157,7 +179,34 @@ def init_db_web():
 def init_db_local():
     conn = sqlite3.connect('users_web.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users_web (...)''')  # ... полные определения
+    c.execute('''CREATE TABLE IF NOT EXISTS users_web (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        premium INTEGER DEFAULT 0,
+        messages_today INTEGER DEFAULT 0,
+        last_reset TEXT,
+        premium_expires TEXT,
+        is_admin INTEGER DEFAULT 0,
+        test_used INTEGER DEFAULT 0,
+        joined_at TEXT,
+        is_owner INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS banned_web (user_id INTEGER PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS muted_web (user_id INTEGER PRIMARY KEY)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS total_stats_web
+                 (user_id INTEGER PRIMARY KEY, total_messages INTEGER DEFAULT 0)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS premium_orders_web
+                 (order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  status TEXT DEFAULT 'pending',
+                  created_at TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS support_requests_web
+                 (request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  user_id INTEGER,
+                  username TEXT,
+                  text TEXT,
+                  status TEXT DEFAULT 'pending',
+                  created_at TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history_web (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
@@ -167,12 +216,476 @@ def init_db_local():
     )''')
     conn.commit()
     conn.close()
+    print("✅ Локальная SQLite база данных создана")
+
+def init_memory_db():
+    conn = sqlite3.connect('memory_web.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS memory_web (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        topic TEXT,
+        fact TEXT,
+        timestamp TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS personality_web (
+        user_id INTEGER PRIMARY KEY,
+        style TEXT,
+        mood TEXT,
+        last_interaction TEXT
+    )''')
+    conn.commit()
+    conn.close()
 
 # ============================================================
-# ФУНКЦИИ ДЛЯ ИСТОРИИ ДИАЛОГА (СОХРАНЕНИЕ И ЗАГРУЗКА)
+# ФУНКЦИИ БАЗЫ ДАННЫХ
+# ============================================================
+def get_db_user(user_id):
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
+            if response.data:
+                return response.data[0]
+            return None
+        except:
+            return None
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result:
+            columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'is_owner']
+            return dict(zip(columns, result))
+        return None
+
+def ensure_user(user_id, username):
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
+            if not response.data:
+                joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
+                is_owner = 1 if user_id == OWNER_ID else 0
+                data = {
+                    'user_id': user_id,
+                    'username': username,
+                    'messages_today': 0,
+                    'last_reset': get_moscow_time().strftime('%Y-%m-%d'),
+                    'is_admin': is_owner,
+                    'test_used': 0,
+                    'joined_at': joined_at,
+                    'is_owner': is_owner,
+                    'premium': 0,
+                    'premium_expires': None
+                }
+                supabase.table('users_web').insert(data).execute()
+                try:
+                    supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 0}).execute()
+                except:
+                    pass
+                return True
+            else:
+                supabase.table('users_web').update({'username': username}).eq('user_id', user_id).execute()
+                return False
+        except Exception as e:
+            print(f"⚠️ Supabase ошибка: {e}")
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
+        user = c.fetchone()
+        if user is None:
+            joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
+            is_owner = 1 if user_id == OWNER_ID else 0
+            c.execute('''INSERT INTO users_web 
+                         (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, is_owner) 
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (user_id, username, 0, get_moscow_time().strftime('%Y-%m-%d'), is_owner, 0, joined_at, is_owner))
+            c.execute('INSERT OR IGNORE INTO total_stats_web (user_id, total_messages) VALUES (?, 0)', (user_id,))
+            conn.commit()
+            conn.close()
+            return True
+        else:
+            c.execute('UPDATE users_web SET username = ? WHERE user_id = ?', (username, user_id))
+            conn.commit()
+            conn.close()
+            return False
+
+def set_premium(user_id, duration_str):
+    now = get_moscow_time()
+    if duration_str.endswith('d'):
+        delta = timedelta(days=int(duration_str[:-1]))
+    elif duration_str.endswith('m'):
+        delta = timedelta(minutes=int(duration_str[:-1]))
+    elif duration_str.endswith('h'):
+        delta = timedelta(hours=int(duration_str[:-1]))
+    elif duration_str.endswith('mes'):
+        delta = relativedelta(months=int(duration_str[:-3]))
+    elif duration_str.endswith('y'):
+        delta = relativedelta(years=int(duration_str[:-1]))
+    else:
+        return False
+
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
+            current_expires = response.data[0].get('premium_expires') if response.data else None
+        except:
+            current_expires = None
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        current_expires = result[0] if result else None
+
+    if current_expires:
+        try:
+            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
+            if current_date > now:
+                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+
+    if use_supabase:
+        try:
+            supabase.table('users_web').update({'premium': 1, 'premium_expires': expires}).eq('user_id', user_id).execute()
+            return True
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
+        conn.commit()
+        conn.close()
+        return True
+
+def remove_premium(user_id):
+    if use_supabase:
+        try:
+            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+def get_premium_status(user_id):
+    if user_id == OWNER_ID:
+        return True
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('premium, premium_expires').eq('user_id', user_id).execute()
+            if response.data:
+                premium = response.data[0].get('premium', 0)
+                expires = response.data[0].get('premium_expires')
+                if premium == 1 and expires:
+                    try:
+                        expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+                        expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
+                        if get_moscow_time() > expires_date:
+                            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
+                            return False
+                    except:
+                        return premium == 1
+                return premium == 1
+            return False
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT premium, premium_expires FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result is None:
+            return False
+        premium, expires = result
+        if premium == 1 and expires:
+            try:
+                expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+                expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
+                if get_moscow_time() > expires_date:
+                    remove_premium(user_id)
+                    return False
+            except:
+                return premium == 1
+        return premium == 1
+
+def get_premium_expires(user_id):
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
+            if response.data:
+                return response.data[0].get('premium_expires')
+            return None
+        except:
+            return None
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('is_admin').eq('user_id', user_id).execute()
+            if response.data:
+                return response.data[0].get('is_admin', 0) == 1
+            return False
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT is_admin FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        return result is not None and result[0] == 1
+
+def set_admin(user_id, status):
+    if use_supabase:
+        try:
+            supabase.table('users_web').update({'is_admin': 1 if status else 0}).eq('user_id', user_id).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET is_admin = ? WHERE user_id = ?', (1 if status else 0, user_id))
+        conn.commit()
+        conn.close()
+
+def is_banned(user_id):
+    if use_supabase:
+        try:
+            response = supabase.table('banned_web').select('user_id').eq('user_id', user_id).execute()
+            return len(response.data) > 0
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM banned_web WHERE user_id = ?', (user_id,))
+        banned = c.fetchone()
+        conn.close()
+        return banned is not None
+
+def ban_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('banned_web').insert({'user_id': user_id}).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO banned_web (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+
+def unban_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('banned_web').delete().eq('user_id', user_id).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM banned_web WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+def is_muted(user_id):
+    if use_supabase:
+        try:
+            response = supabase.table('muted_web').select('user_id').eq('user_id', user_id).execute()
+            return len(response.data) > 0
+        except:
+            return False
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM muted_web WHERE user_id = ?', (user_id,))
+        muted = c.fetchone()
+        conn.close()
+        return muted is not None
+
+def mute_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('muted_web').insert({'user_id': user_id}).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO muted_web (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+
+def unmute_user(user_id):
+    if use_supabase:
+        try:
+            supabase.table('muted_web').delete().eq('user_id', user_id).execute()
+        except:
+            pass
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM muted_web WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+def reset_messages_if_needed(user_id):
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('last_reset').eq('user_id', user_id).execute()
+            if response.data:
+                last_reset = response.data[0].get('last_reset')
+                today = get_moscow_time().strftime('%Y-%m-%d')
+                if last_reset != today:
+                    supabase.table('users_web').update({
+                        'messages_today': 0,
+                        'last_reset': today
+                    }).eq('user_id', user_id).execute()
+        except:
+            pass
+        return
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT last_reset FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        if result is None:
+            conn.close()
+            return
+        last_reset = result[0]
+        today = get_moscow_time().strftime('%Y-%m-%d')
+        if last_reset != today:
+            c.execute('UPDATE users_web SET messages_today = 0, last_reset = ? WHERE user_id = ?', (today, user_id))
+            conn.commit()
+        conn.close()
+
+def can_send_message(user_id):
+    if user_id == OWNER_ID or is_admin(user_id):
+        return True
+    if is_banned(user_id):
+        return False
+    reset_messages_if_needed(user_id)
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('messages_today, premium').eq('user_id', user_id).execute()
+            if response.data:
+                messages = response.data[0].get('messages_today', 0)
+                premium = response.data[0].get('premium', 0)
+                if premium == 1:
+                    return True
+                return messages < FREE_LIMIT
+            return True
+        except:
+            return True
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT messages_today, premium FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        conn.close()
+        if result is None:
+            return True
+        messages, premium = result
+        if premium == 1:
+            return True
+        return messages < FREE_LIMIT
+
+def increment_messages(user_id):
+    if user_id == OWNER_ID or is_admin(user_id):
+        return
+    if use_supabase:
+        try:
+            response = supabase.table('users_web').select('messages_today').eq('user_id', user_id).execute()
+            if response.data:
+                current = response.data[0].get('messages_today', 0)
+                supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
+            response2 = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
+            if response2.data:
+                total = response2.data[0].get('total_messages', 0)
+                supabase.table('total_stats_web').update({'total_messages': total + 1}).eq('user_id', user_id).execute()
+            else:
+                supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 1}).execute()
+        except:
+            pass
+        return
+    else:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('UPDATE users_web SET messages_today = messages_today + 1 WHERE user_id = ?', (user_id,))
+        c.execute('UPDATE total_stats_web SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+
+# ============================================================
+# ПАМЯТЬ (ЛОКАЛЬНАЯ SQLite)
+# ============================================================
+def remember(user_id, topic, fact):
+    conn = sqlite3.connect('memory_web.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO memory_web (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
+              (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
+    conn.commit()
+    conn.close()
+
+def recall(user_id, topic):
+    conn = sqlite3.connect('memory_web.db')
+    c = conn.cursor()
+    c.execute('SELECT fact FROM memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY timestamp DESC LIMIT 3',
+              (user_id, f'%{topic.lower()}%'))
+    results = c.fetchall()
+    conn.close()
+    if results:
+        return [f"🧠 {r[0]}" for r in results]
+    return []
+
+def set_personality(user_id, mood=None):
+    conn = sqlite3.connect('memory_web.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM personality_web WHERE user_id = ?', (user_id,))
+    exists = c.fetchone()
+    if exists:
+        if mood:
+            c.execute('UPDATE personality_web SET mood = ?, last_interaction = ? WHERE user_id = ?',
+                     (mood, get_moscow_time().isoformat(), user_id))
+        else:
+            c.execute('UPDATE personality_web SET last_interaction = ? WHERE user_id = ?',
+                     (get_moscow_time().isoformat(), user_id))
+    else:
+        c.execute('INSERT INTO personality_web (user_id, style, mood, last_interaction) VALUES (?, ?, ?, ?)',
+                  (user_id, 'neutral', mood or 'neutral', get_moscow_time().isoformat()))
+    conn.commit()
+    conn.close()
+
+# ============================================================
+# ИСТОРИЯ ДИАЛОГА (ВКЛЮЧАЯ КОНТЕКСТ)
 # ============================================================
 def save_message(user_id, role, content):
-    """Сохраняет сообщение в историю диалога"""
     timestamp = get_moscow_time().isoformat()
     if use_supabase:
         try:
@@ -193,7 +706,6 @@ def save_message(user_id, role, content):
         conn.close()
 
 def get_history(user_id, limit=10):
-    """Получает последние N сообщений для пользователя"""
     if use_supabase:
         try:
             response = supabase.table('chat_history_web') \
@@ -203,7 +715,6 @@ def get_history(user_id, limit=10):
                 .limit(limit) \
                 .execute()
             if response.data:
-                # Переворачиваем, чтобы получить хронологический порядок
                 history = list(reversed(response.data))
                 return history
             return []
@@ -221,7 +732,6 @@ def get_history(user_id, limit=10):
         return history
 
 def clear_history(user_id):
-    """Очищает историю диалога для пользователя"""
     if use_supabase:
         try:
             supabase.table('chat_history_web').delete().eq('user_id', user_id).execute()
@@ -235,37 +745,570 @@ def clear_history(user_id):
         conn.close()
 
 # ============================================================
-# ОСТАЛЬНЫЕ ФУНКЦИИ БАЗЫ ДАННЫХ (users, premium, etc.)
+# КЭШ
 # ============================================================
-# ... (здесь должны быть функции ensure_user, get_db_user, set_premium, get_premium_status, is_admin, etc.)
-# Для краткости я не буду полностью дублировать их, так как они уже были в предыдущем ответе.
-# В финальном коде они будут присутствовать.
+CACHE = {}
+CACHE_TTL = 60
+
+def get_cache(key):
+    if key in CACHE:
+        data, ts = CACHE[key]
+        if time.time() - ts < CACHE_TTL:
+            return data
+        del CACHE[key]
+    return None
+
+def set_cache(key, data):
+    CACHE[key] = (data, time.time())
 
 # ============================================================
-# ПОИСК, ПОГОДА, КУРСЫ, МАТЕМАТИКА, НЕЙРОСЕТИ
+# ПОИСК ПО ИНТЕРНЕТУ
 # ============================================================
-# ... (весь код из предыдущего ответа, включая search_google, search_wikipedia, get_weather, get_exchange_rates, solve_math, generate_with_gigachat, generate_with_yandexgpt, SUPER_SYSTEM_PROMPT, process_message)
+def search_google(query):
+    try:
+        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=ru"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for result in soup.select('div.g')[:2]:
+                title_elem = result.select_one('h3')
+                snippet_elem = result.select_one('div.VwiC3b')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
+                    if title:
+                        results.append(f"🔹 {title}\n📝 {snippet[:100]}")
+            if results:
+                return "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_wikipedia(query):
+    try:
+        url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(query)}&format=json&utf8=1"
+        response = requests.get(url, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get('query', {}).get('search', [])
+            if results:
+                text = ""
+                for item in results[:2]:
+                    title = item.get('title', '')
+                    snippet = re.sub(r'<[^>]+>', '', item.get('snippet', ''))[:100]
+                    text += f"📚 {title}\n{snippet}\n\n"
+                return text
+        return None
+    except:
+        return None
+
+def search_news(query):
+    try:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=ru&gl=RU&ceid=RU:ru"
+        response = requests.get(url, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'xml')
+            items = soup.find_all('item')[:2]
+            if items:
+                text = ""
+                for item in items:
+                    title = item.find('title')
+                    if title:
+                        text += f"📰 {title.text}\n"
+                return text
+        return None
+    except:
+        return None
+
+def search_youtube(query):
+    try:
+        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}&hl=ru"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for video in soup.select('ytd-video-renderer')[:2]:
+                title_elem = video.select_one('yt-formatted-string#video-title')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    if title:
+                        results.append(f"🎬 {title}")
+            if results:
+                return "YouTube:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_telegram(query):
+    try:
+        url = f"https://tgstat.ru/search?query={urllib.parse.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for channel in soup.select('div.channel-item')[:2]:
+                name_elem = channel.select_one('div.channel-name')
+                if name_elem:
+                    name = name_elem.get_text(strip=True)
+                    results.append(f"📱 {name}")
+            if results:
+                return "Telegram:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_vk(query):
+    try:
+        url = f"https://vk.com/search?c[q]={urllib.parse.quote(query)}&c[section]=communities"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for group in soup.select('div.group_row')[:2]:
+                name_elem = group.select_one('div.group_name')
+                if name_elem:
+                    name = name_elem.get_text(strip=True)
+                    results.append(f"📌 {name}")
+            if results:
+                return "VK:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_twitch(query):
+    try:
+        url = f"https://www.twitch.tv/search?term={urllib.parse.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for stream in soup.select('div.tw-card')[:2]:
+                title_elem = stream.select_one('h3.tw-core-text')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    results.append(f"🎮 {title}")
+            if results:
+                return "Twitch:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_all_internet(query):
+    cache_key = f"search_{hash(query)}_{int(time.time()/60)}"
+    cached = get_cache(cache_key)
+    if cached:
+        return cached
+
+    results = []
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [
+            executor.submit(search_google, query),
+            executor.submit(search_wikipedia, query),
+            executor.submit(search_news, query),
+            executor.submit(search_youtube, query),
+            executor.submit(search_telegram, query),
+            executor.submit(search_vk, query),
+            executor.submit(search_twitch, query)
+        ]
+        for future in as_completed(futures):
+            try:
+                result = future.result(timeout=SEARCH_TIMEOUT + 0.5)
+                if result:
+                    results.append(result)
+            except:
+                pass
+
+    if results:
+        final = "\n\n".join(results[:4])
+        set_cache(cache_key, final)
+        return final
+    return None
 
 # ============================================================
-# ОБНОВЛЕННАЯ ФУНКЦИЯ ПРОЦЕССИНГА С ИСТОРИЕЙ
+# ПОГОДА
+# ============================================================
+def get_coordinates(city):
+    try:
+        city_lower = city.lower().strip()
+        if "ростов" in city_lower and ("дон" in city_lower or "на дону" in city_lower):
+            city = "Ростов-на-Дону"
+        elif "спб" in city_lower or "питер" in city_lower:
+            city = "Санкт-Петербург"
+        elif "мск" in city_lower:
+            city = "Москва"
+        url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(city)}&format=json&limit=1&accept-language=ru"
+        headers = {"User-Agent": "AwesomeAI/1.0"}
+        response = requests.get(url, headers=headers, timeout=WEATHER_TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                lat = data[0].get('lat')
+                lon = data[0].get('lon')
+                display_name = data[0].get('display_name', city)
+                if len(display_name) > 50:
+                    parts = display_name.split(',')
+                    display_name = parts[0] if parts else city
+                return float(lat), float(lon), display_name
+        return None, None, city
+    except:
+        return None, None, city
+
+def get_weather(city):
+    try:
+        lat, lon, display_name = get_coordinates(city)
+        if lat is None:
+            return None
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=7"
+        response = requests.get(url, timeout=WEATHER_TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            current = data.get('current_weather', {})
+            daily = data.get('daily', {})
+            temp = current.get('temperature')
+            weathercode = current.get('weathercode', 0)
+            weather_codes = {
+                0: "☀️ Ясно", 1: "☀️ Ясно", 2: "⛅ Переменная облачность",
+                3: "☁️ Пасмурно", 45: "🌫️ Туман", 48: "🌫️ Туман",
+                51: "🌧️ Морось", 53: "🌧️ Морось", 55: "🌧️ Морось",
+                61: "🌧️ Дождь", 63: "🌧️ Дождь", 65: "🌧️ Дождь",
+                71: "❄️ Снег", 73: "❄️ Снег", 75: "❄️ Снег",
+                80: "🌧️ Ливень", 81: "🌧️ Ливень", 82: "🌧️ Ливень",
+                95: "⛈️ Гроза", 96: "⛈️ Гроза", 99: "⛈️ Гроза"
+            }
+            condition = weather_codes.get(weathercode, "☁️ Облачно")
+            forecast = ""
+            if daily.get('time'):
+                times = daily['time']
+                max_temps = daily.get('temperature_2m_max', [])
+                min_temps = daily.get('temperature_2m_min', [])
+                weather_codes_daily = daily.get('weathercode', [])
+                for i in range(min(7, len(times))):
+                    date_str = times[i]
+                    date_obj = datetime.fromisoformat(date_str)
+                    date_formatted = date_obj.strftime('%d.%m')
+                    max_t = round(max_temps[i]) if i < len(max_temps) else "?"
+                    min_t = round(min_temps[i]) if i < len(min_temps) else "?"
+                    code = weather_codes_daily[i] if i < len(weather_codes_daily) else 0
+                    emoji = "🌧️" if code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99] else "☀️"
+                    forecast += f"\n📅 {date_formatted}: {emoji} {min_t}°C → {max_t}°C"
+            result = f"🌤 *Погода в {display_name}*\n"
+            result += f"☀️ Сейчас: {condition}, {round(temp)}°C\n"
+            result += f"📊 *Прогноз на неделю:*{forecast}"
+            return result
+        return None
+    except:
+        return None
+
+def extract_city_from_query(text):
+    text_lower = text.lower()
+    known_cities = ["москва", "санкт-петербург", "ростов-на-дону", "ростов", "новосибирск", "екатеринбург", "казань", "нижний новгород", "краснодар", "сочи", "владивосток", "вологда", "волгодонск"]
+    for city in known_cities:
+        if city in text_lower:
+            return city
+    match = re.search(r'в\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
+    if match:
+        city = match.group(1).strip()
+        for word in ['завтра', 'сегодня', 'на', 'дону', 'дон']:
+            city = city.replace(word, '').strip()
+        if city:
+            return city
+    return None
+
+# ============================================================
+# КУРСЫ ВАЛЮТ И КРИПТЫ
+# ============================================================
+def get_exchange_rates():
+    try:
+        url = "https://api.exchangerate-api.com/v4/latest/USD"
+        response = requests.get(url, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            rates = data.get('rates', {})
+            usd_to_rub = rates.get('RUB', '?')
+            eur_to_rub = rates.get('RUB', '?') * (1 / rates.get('EUR', 1)) if rates.get('EUR') else '?'
+            return f"💵 *Курс валют:*\n🇺🇸 USD → RUB: {round(usd_to_rub, 2)}₽\n🇪🇺 EUR → RUB: {round(eur_to_rub, 2)}₽"
+        return None
+    except:
+        return None
+
+def get_crypto_rates():
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
+        response = requests.get(url, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            data = response.json()
+            btc = data.get('bitcoin', {}).get('usd', '?')
+            eth = data.get('ethereum', {}).get('usd', '?')
+            return f"🪙 *Криптовалюты:*\n₿ BTC: ${btc}\n⟠ ETH: ${eth}"
+        return None
+    except:
+        return None
+
+# ============================================================
+# МАТЕМАТИКА
+# ============================================================
+def solve_math(text):
+    text_lower = text.lower().strip()
+    game_keywords = ['гта', 'gta', 'играю', 'игра', 'rp', 'роль', 'сервер']
+    if any(kw in text_lower for kw in game_keywords):
+        return None
+    equation_match = re.search(r'(\d+)x\s*\+\s*(\d+)\s*=\s*(\d+)', text_lower)
+    if equation_match:
+        a = int(equation_match.group(1))
+        b = int(equation_match.group(2))
+        c = int(equation_match.group(3))
+        if a != 0:
+            x = (c - b) / a
+            return f"🧮 *Решение:* {a}x + {b} = {c}\n➜ x = {x}"
+    clean_for_math = text_lower
+    for word in ['сколько', 'будет', 'сколько будет', 'посчитай', 'реши', 'пример']:
+        clean_for_math = clean_for_math.replace(word, '').strip()
+    if not re.search(r'\d', clean_for_math):
+        return None
+    clean_text = clean_for_math.replace(' ', '').replace('плюс', '+').replace('минус', '-')
+    clean_text = clean_text.replace('умножить', '*').replace('разделить', '/')
+    if re.search(r'[a-zа-я][^x]', clean_text):
+        return None
+    if not re.search(r'[+\-*/]', clean_text):
+        return None
+    if re.match(r'^\d+$', clean_text):
+        return None
+    try:
+        expr = re.sub(r'[^0-9+\-*/()=.]', '', clean_text)
+        if expr and len(expr) > 1:
+            result = eval(expr)
+            if result == int(result):
+                return f"🧮 *Результат:* {expr} = **{int(result)}**"
+            else:
+                return f"🧮 *Результат:* {expr} = **{result}**"
+    except:
+        pass
+    return None
+
+# ============================================================
+# GIGACHAT (ОСНОВНОЙ)
+# ============================================================
+gigachat_token_cache = None
+gigachat_token_time = 0
+
+def get_gigachat_token():
+    global gigachat_token_cache, gigachat_token_time
+    if gigachat_token_cache and time.time() - gigachat_token_time < 300:
+        return gigachat_token_cache
+
+    if not GIGACHAT_AUTH_KEY:
+        return None
+    try:
+        url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "RqUID": "00000000-0000-0000-0000-000000000000",
+            "Authorization": f"Basic {GIGACHAT_AUTH_KEY}"
+        }
+        data = {"scope": "GIGACHAT_API_PERS", "grant_type": "client_credentials"}
+        response = requests.post(url, headers=headers, data=data, timeout=2, verify=False)
+        if response.status_code == 200:
+            gigachat_token_cache = response.json().get("access_token")
+            gigachat_token_time = time.time()
+            return gigachat_token_cache
+        return None
+    except:
+        return None
+
+def generate_with_gigachat(user_text, system_prompt):
+    try:
+        token = get_gigachat_token()
+        if not token:
+            return None
+
+        url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        data = {
+            "model": "GigaChat-Pro",
+            "messages": [
+                {"role": "system", "content": system_prompt[:1000]},
+                {"role": "user", "content": user_text}
+            ],
+            "temperature": 0.85,
+            "max_tokens": 500
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=GIGACHAT_TIMEOUT, verify=False)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        return None
+    except:
+        return None
+
+# ============================================================
+# YANDEXGPT (БАЗА ДАННЫХ ИНТЕРНЕТА)
+# ============================================================
+def generate_with_yandexgpt(user_text, system_prompt):
+    try:
+        if not YANDEX_API_KEY:
+            return None
+
+        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
+        data = {
+            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
+            "completionOptions": {"temperature": 0.85, "maxTokens": 400},
+            "messages": [
+                {"role": "system", "text": system_prompt[:1000]},
+                {"role": "user", "text": user_text}
+            ]
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=YANDEXGPT_TIMEOUT)
+        if response.status_code == 200:
+            return response.json()["result"]["alternatives"][0]["message"]["text"]
+        return None
+    except:
+        return None
+
+# ============================================================
+# СУПЕР-ПРОМПТ
+# ============================================================
+SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ 2026 ГОДА.
+
+================================================================================
+📍 ТЫ НАХОДИШЬСЯ В МОСКВЕ, РОССИЯ (UTC+3)
+📅 ТЕКУЩАЯ ДАТА: {current_date}
+🕐 ТЕКУЩЕЕ ВРЕМЯ: {current_time}
+================================================================================
+
+🔬 ТЫ — ЭКСПЕРТ ВО ВСЁМ:
+- Науки, технологии, математика, физика, химия, биология
+- История, философия, психология, социология
+- Экономика, финансы, инвестиции, криптовалюты
+- Медицина, здоровье, питание, спорт
+- Культура, искусство, литература, музыка
+- Программирование, ИИ, нейросети, IT
+- Политика, геополитика, право
+
+================================================================================
+🧠 КЛЮЧЕВЫЕ КАЧЕСТВА:
+================================================================================
+1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах. Если не уверен — честно скажи "я проверю".
+2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию из нескольких источников.
+3. ГЛУБИНА — даёшь ответы, которые удивляют инсайтами и неочевидными связями.
+4. ПРАКТИЧНОСТЬ — всегда даёшь конкретную пользу: инструкции, советы, примеры.
+5. ЖИВОСТЬ — отвечаешь как человек, с эмоциями, юмором, эмодзи, но без воды.
+
+================================================================================
+📋 ПРАВИЛА ОТВЕТОВ:
+================================================================================
+✅ Дай максимально полезный, развёрнутый ответ.
+✅ Используй структуру: списки, заголовки, разделы.
+✅ Добавляй неожиданные факты, инсайты, параллели.
+✅ Приводи реальные примеры, кейсы, цифры.
+✅ Используй эмодзи для оформления (🔥, 🧠, 💡, ⚡, 🚀).
+✅ Если вопрос сложный — разбей на шаги.
+✅ Если вопрос простой — ответь коротко и ясно.
+
+❌ НЕ извиняйся, НЕ повторяй вопрос, НЕ используй шаблонные фразы.
+❌ НЕ пиши "возможно", "наверное", "может быть" — либо знаешь, либо проверяешь.
+❌ НЕ используй сухой, безликий тон — ты живой и эмоциональный.
+
+================================================================================
+💎 ДЛЯ PREMIUM:
+================================================================================
+- Давай максимально насыщенные, глубокие ответы.
+- Добавляй аналитику, прогнозы, сравнения.
+- Приводи ссылки на авторитетные источники.
+- Отвечай развернуто, как профессиональный консультант.
+
+================================================================================
+📜 КТО ТЕБЯ СОЗДАЛ:
+================================================================================
+«Меня создал AWESOME — гениальный разработчик. Я — его лучшее творение, эволюция всех AI. Я — AWESOME AI 2026. 🔥»
+
+================================================================================
+🎯 ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
+================================================================================
+Удивить пользователя глубиной, точностью и полезностью. Сделать так, чтобы после твоего ответа он сказал: "Вот это да, реально мега умный ИИ!" 
+
+ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ. ДОКАЖИ ЭТО КАЖДЫМ ОТВЕТОМ! 🚀"""
+
+def generate_fallback_response(user_text, search_result=None):
+    if search_result:
+        return f"🔍 {search_result[:500]}"
+    text_lower = user_text.lower()
+    if "привет" in text_lower:
+        return "👋 Привет! Я AWESOME AI. Чем могу помочь?"
+    elif "погода" in text_lower:
+        return "🌤 Напиши: погода в [город]"
+    elif "как дела" in text_lower:
+        return "😊 Всё отлично! А у тебя?"
+    else:
+        return "🤖 Задай вопрос, я найду ответ!"
+
+# ============================================================
+# ГЕНЕРАЦИЯ КАРТИНОК
+# ============================================================
+def generate_image(prompt):
+    try:
+        clean_prompt = prompt
+        for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение', '/draw']:
+            clean_prompt = clean_prompt.replace(word, '').strip()
+        if not clean_prompt:
+            clean_prompt = prompt
+
+        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=512&height=512&nologo=true"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200 and len(response.content) > 1000:
+            return response.content
+    except:
+        pass
+    return None
+
+def fix_title(prompt):
+    title = prompt
+    for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение', '/draw']:
+        title = title.replace(word, '').strip()
+    if not title or len(title) < 2:
+        return "Картинка"
+    return title[0].upper() + title[1:] if len(title) > 1 else title.upper()
+
+def is_image_generation(text):
+    image_keywords = ['нарисуй', 'покажи', 'картинку', 'изображение']
+    return any(kw in text.lower() for kw in image_keywords)
+
+# ============================================================
+# АНАЛИЗ ИЗОБРАЖЕНИЙ
+# ============================================================
+def analyze_image_from_file(file_content):
+    try:
+        img = Image.open(io.BytesIO(file_content))
+        width, height = img.size
+        format_img = img.format or "Unknown"
+        description = f"📸 *Анализ:* {width}×{height}, {format_img}\n"
+        # Можно добавить Yandex Vision, но для простоты оставим базовый анализ
+        return description
+    except:
+        return "⚠️ Не удалось проанализировать изображение."
+
+# ============================================================
+# ОСНОВНАЯ ОБРАБОТКА С ИСТОРИЕЙ
 # ============================================================
 def process_message_with_history(user_id, user_text, image_description=None):
-    """Обрабатывает сообщение с учётом истории диалога"""
-    # 1. Сначала проверяем, не является ли это командой, которую нужно обработать отдельно
-    #    (команды не должны сохраняться в истории, чтобы не засорять контекст)
-    if user_text.startswith('/'):
-        # Обработка команд (как в предыдущем коде)
-        # ... (здесь должен быть код обработки команд из предыдущего ответа)
-        # Для краткости я пропущу, но он полностью будет в финальном коде
-        pass
-
-    # 2. Сохраняем сообщение пользователя в историю
+    # Сохраняем сообщение пользователя
     save_message(user_id, 'user', user_text)
 
-    # 3. Получаем последние 10 сообщений истории (для контекста)
+    # Получаем историю (10 последних сообщений)
     history = get_history(user_id, limit=10)
 
-    # 4. Формируем системный промпт, добавляя историю
+    # Формируем системный промпт с историей
     current_date = get_current_date()
     current_time = get_moscow_time().strftime('%H:%M')
     system_prompt = SUPER_SYSTEM_PROMPT.format(
@@ -278,117 +1321,44 @@ def process_message_with_history(user_id, user_text, image_description=None):
     if image_description:
         system_prompt += f"\n\n📸 На изображении: {image_description}"
 
-    # Добавляем память (факты из memory)
     memories = recall(user_id, user_text)
     if memories:
         system_prompt += f"\n\n🧠 Что я помню об этом: {' '.join(memories[:2])}"
 
-    # Добавляем историю диалога (до 10 последних сообщений)
     if history:
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 История диалога (последние сообщения):\n{history_text}"
 
-    # 5. Выполняем поиск в интернете, если нужно
+    # Поиск в интернете, если нужно
     search_result = None
     if len(user_text) > 3 and not any(kw in user_text.lower() for kw in ['погода', 'курс', 'биткоин', 'эфириум']):
         search_result = search_all_internet(user_text)
 
-    # 6. Генерируем ответ через GigaChat или YandexGPT
-    # ... (код генерации, как в process_message из предыдущего ответа)
-    # Для примера:
-    response = generate_ai_response(user_id, user_text, system_prompt, search_result, image_description)
+    # Генерация ответа
+    response = None
+    try:
+        if GIGACHAT_AUTH_KEY:
+            response = generate_with_gigachat(user_text, system_prompt)
+            if response and len(response) > 5:
+                pass
+    except:
+        pass
+    if not response:
+        try:
+            response = generate_with_yandexgpt(user_text, system_prompt)
+        except:
+            pass
+    if not response:
+        response = generate_fallback_response(user_text, search_result)
 
-    # 7. Сохраняем ответ бота в историю
+    # Сохраняем ответ бота
     if response:
         save_message(user_id, 'assistant', response)
 
     return response
 
 # ============================================================
-# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ГЕНЕРАЦИИ (с использованием истории)
-# ============================================================
-def generate_ai_response(user_id, user_text, system_prompt, search_result=None, image_description=None):
-    # Пробуем GigaChat, затем YandexGPT, затем fallback
-    try:
-        if GIGACHAT_AUTH_KEY:
-            response = generate_with_gigachat(user_text, system_prompt)
-            if response and len(response) > 5:
-                return response
-    except: pass
-    try:
-        response = generate_with_yandexgpt(user_text, system_prompt)
-        if response and len(response) > 5:
-            return response
-    except: pass
-    return generate_fallback_response(user_text, search_result)
-
-# ============================================================
-# ЭНДПОИНТЫ
-# ============================================================
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    try:
-        data = request.json
-        message = data.get('message', '')
-        user_id = data.get('user_id', 1)
-        if not message:
-            return jsonify({'error': 'Напиши что-нибудь!'})
-
-        ensure_user(user_id, f"user_{user_id}")
-
-        # Проверка лимитов
-        if not can_send_message(user_id):
-            user_data = get_db_user(user_id)
-            messages = user_data.get('messages_today', 0) if user_data else 0
-            remaining = FREE_LIMIT - messages
-            if remaining < 0:
-                remaining = 0
-            return jsonify({'reply': f"🔴 Лимит исчерпан! Осталось: {remaining}/{FREE_LIMIT}\n💎 Купи Premium: /premium"})
-
-        # Обработка команды /clear (очистка истории)
-        if message.strip() == '/clear':
-            clear_history(user_id)
-            return jsonify({'reply': "🧹 История диалога очищена!"})
-
-        # Обработка команды /history (показать историю)
-        if message.strip() == '/history':
-            history = get_history(user_id, limit=10)
-            if not history:
-                return jsonify({'reply': "📜 История пуста."})
-            text = "📜 *Последние сообщения:*\n"
-            for h in history:
-                role = "👤 Вы" if h['role'] == 'user' else "🤖 AWESOME AI"
-                text += f"\n**{role}:** {h['content'][:100]}{'...' if len(h['content'])>100 else ''}"
-            return jsonify({'reply': text})
-
-        # Основная обработка с историей
-        response = process_message_with_history(user_id, message)
-        if response:
-            increment_messages(user_id)
-            return jsonify({'reply': response})
-        else:
-            return jsonify({'reply': "❌ Не удалось обработать запрос."})
-
-    except Exception as e:
-        print(f"Ошибка в /api/chat: {e}")
-        return jsonify({'error': str(e)})
-
-@app.route('/api/analyze_image', methods=['POST'])
-def analyze_image():
-    # ... (как в предыдущем ответе)
-    pass
-
-@app.route('/admin')
-def admin_panel():
-    # ... (как в предыдущем ответе)
-    pass
-
-# ============================================================
-# HTML ТЕМПЛЕЙТ (с дополнительной кнопкой "Очистить историю" и "История")
+# HTML ТЕМПЛЕЙТ (полностью идентичен предыдущему, но без speech_recognition)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -833,7 +1803,6 @@ HTML_TEMPLATE = """
             if (welcome) welcome.remove();
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            // Поддержка Markdown: жирный, курсив, код
             let formatted = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
             formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>');
             formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
@@ -960,8 +1929,294 @@ HTML_TEMPLATE = """
 """
 
 # ============================================================
-# АДМИН-ПАНЕЛЬ (как в предыдущем ответе)
+# ЭНДПОИНТЫ
 # ============================================================
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    try:
+        data = request.json
+        message = data.get('message', '')
+        user_id = data.get('user_id', 1)
+        if not message:
+            return jsonify({'error': 'Напиши что-нибудь!'})
+
+        ensure_user(user_id, f"user_{user_id}")
+
+        if not can_send_message(user_id):
+            user_data = get_db_user(user_id)
+            messages = user_data.get('messages_today', 0) if user_data else 0
+            remaining = FREE_LIMIT - messages
+            if remaining < 0:
+                remaining = 0
+            return jsonify({'reply': f"🔴 Лимит исчерпан! Осталось: {remaining}/{FREE_LIMIT}\n💎 Купи Premium: /premium"})
+
+        # Обработка команд
+        if message.startswith('/'):
+            cmd = message.lower().strip()
+            if cmd == '/clear':
+                clear_history(user_id)
+                return jsonify({'reply': "🧹 История диалога очищена!"})
+            elif cmd == '/history':
+                history = get_history(user_id, limit=10)
+                if not history:
+                    return jsonify({'reply': "📜 История пуста."})
+                text = "📜 *Последние сообщения:*\n"
+                for h in history:
+                    role = "👤 Вы" if h['role'] == 'user' else "🤖 AWESOME AI"
+                    text += f"\n**{role}:** {h['content'][:100]}{'...' if len(h['content'])>100 else ''}"
+                return jsonify({'reply': text})
+            elif cmd == '/status':
+                user_data = get_db_user(user_id)
+                if not user_data:
+                    return jsonify({'reply': '❌ Пользователь не найден'})
+                premium = get_premium_status(user_id)
+                messages = user_data.get('messages_today', 0)
+                status_text = "💎 PREMIUM" if premium else "🔓 Бесплатный"
+                if premium:
+                    expires = get_premium_expires(user_id)
+                    if expires:
+                        expires_f = format_date(expires)
+                        status_text += f" (до {expires_f})"
+                remaining = FREE_LIMIT - messages if not premium else "♾️"
+                reply = f"📊 *ТВОЙ СТАТУС*\n\n👤 {status_text}\n📨 {remaining}/{FREE_LIMIT if not premium else '♾️'}"
+                return jsonify({'reply': reply})
+            elif cmd == '/premium':
+                has_premium = get_premium_status(user_id)
+                if has_premium:
+                    expires = get_premium_expires(user_id)
+                    if expires:
+                        expires_f = format_date(expires)
+                        reply = f"💎 *У ТЕБЯ УЖЕ ЕСТЬ PREMIUM!*\n\n⏳ До: {expires_f}\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n\n💰 100₽/месяц"
+                    else:
+                        reply = "💎 *У ТЕБЯ УЖЕ ЕСТЬ PREMIUM!*\n\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n\n💰 100₽/месяц"
+                else:
+                    reply = "💎 *PREMIUM AWESOME AI*\n\n🔥 *ЧТО ТЫ ПОЛУЧАЕШЬ:*\n♾️ *БЕЗЛИМИТНЫЕ СООБЩЕНИЯ*\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n\n💰 *Цена: 100₽/месяц*"
+                return jsonify({'reply': reply})
+            elif cmd == '/test':
+                if use_supabase:
+                    try:
+                        response = supabase.table('users_web').select('test_used, premium').eq('user_id', user_id).execute()
+                        if response.data:
+                            test_used = response.data[0].get('test_used', 0)
+                            premium = response.data[0].get('premium', 0)
+                        else:
+                            return jsonify({'reply': '❌ Пользователь не найден'})
+                    except:
+                        return jsonify({'reply': '❌ Ошибка БД'})
+                else:
+                    conn = sqlite3.connect('users_web.db')
+                    c = conn.cursor()
+                    c.execute('SELECT test_used, premium FROM users_web WHERE user_id = ?', (user_id,))
+                    result = c.fetchone()
+                    conn.close()
+                    if not result:
+                        return jsonify({'reply': '❌ Пользователь не найден'})
+                    test_used, premium = result
+
+                if get_premium_status(user_id):
+                    return jsonify({'reply': '💎 У тебя уже есть Premium!'})
+                if test_used == 1:
+                    return jsonify({'reply': '⛔ Ты уже использовал тест Premium!\nКупи Premium: /premium'})
+                if set_premium(user_id, "2d"):
+                    if use_supabase:
+                        try:
+                            supabase.table('users_web').update({'test_used': 1}).eq('user_id', user_id).execute()
+                        except:
+                            pass
+                    else:
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('UPDATE users_web SET test_used = 1 WHERE user_id = ?', (user_id,))
+                        conn.commit()
+                        conn.close()
+                    reply = "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!*\n\n✅ Приоритетная обработка\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Более качественные ответы\n\n⏳ Доступ активен 48 часов.\n🔥 Наслаждайся!"
+                    return jsonify({'reply': reply})
+                else:
+                    return jsonify({'reply': '❌ Ошибка при активации теста'})
+            elif cmd == '/profile':
+                user_data = get_db_user(user_id)
+                if not user_data:
+                    return jsonify({'reply': '❌ Пользователь не найден'})
+                messages = user_data.get('messages_today', 0)
+                premium = get_premium_status(user_id)
+                joined_at = user_data.get('joined_at', 'Неизвестно')
+                is_owner = user_data.get('is_owner', 0) == 1
+                is_admin_flag = user_data.get('is_admin', 0) == 1
+                if user_id == OWNER_ID or is_owner:
+                    status = "👑 ВЛАДЕЛЕЦ"
+                    limit_text = "♾️ Безлимит"
+                elif is_admin_flag or is_admin(user_id):
+                    status = "👑 АДМИН"
+                    limit_text = "♾️ Безлимит"
+                elif premium:
+                    expires = get_premium_expires(user_id)
+                    if expires:
+                        expires_f = format_date(expires)
+                        status = f"💎 PREMIUM (до {expires_f})"
+                    else:
+                        status = "💎 PREMIUM"
+                    limit_text = "♾️ Безлимит"
+                else:
+                    remaining = FREE_LIMIT - messages
+                    if remaining < 0:
+                        remaining = 0
+                    status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
+                    limit_text = f"{FREE_LIMIT}/день"
+                username = f"user_{user_id}"
+                reply = f"👤 *ТВОЙ ПРОФИЛЬ*\n\n🆔 ID: `{user_id}`\n👤 Юзер: @{username}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n📅 Вход: {joined_at or 'Неизвестно'} (МСК)"
+                return jsonify({'reply': reply})
+            elif cmd == '/stats':
+                if user_id == OWNER_ID or is_admin(user_id):
+                    if use_supabase:
+                        try:
+                            response = supabase.table('users_web').select('*').execute()
+                            users = response.data
+                        except:
+                            users = []
+                    else:
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('SELECT * FROM users_web')
+                        users = c.fetchall()
+                        conn.close()
+                        users = [{'user_id': u[0], 'premium': u[2], 'is_admin': u[6]} for u in users]
+                    total_users = len(users)
+                    premium_users = sum(1 for u in users if u.get('premium', 0) == 1)
+                    admin_users = sum(1 for u in users if u.get('is_admin', 0) == 1)
+                    reply = f"📊 *СТАТИСТИКА СЕРВЕРА*\n\n👥 Всего: {total_users}\n👑 Админов: {admin_users}\n💎 Premium: {premium_users}\n🔓 Бесплатных: {total_users - premium_users - admin_users}"
+                else:
+                    user_data = get_db_user(user_id)
+                    if not user_data:
+                        return jsonify({'reply': '❌ Пользователь не найден'})
+                    messages_today = user_data.get('messages_today', 0)
+                    premium = get_premium_status(user_id)
+                    if premium:
+                        status = "💎 PREMIUM"
+                        limit_text = "♾️ Безлимит"
+                    else:
+                        remaining = FREE_LIMIT - messages_today
+                        if remaining < 0:
+                            remaining = 0
+                        status = "🔓 Бесплатный"
+                        limit_text = f"{remaining}/{FREE_LIMIT}"
+                    if use_supabase:
+                        try:
+                            resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
+                            total = resp.data[0].get('total_messages', 0) if resp.data else 0
+                        except:
+                            total = 0
+                    else:
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('SELECT total_messages FROM total_stats_web WHERE user_id = ?', (user_id,))
+                        result = c.fetchone()
+                        conn.close()
+                        total = result[0] if result else 0
+                    reply = f"📊 *ТВОЯ СТАТИСТИКА*\n\n👤 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages_today}\n📊 Всего: {total}"
+                return jsonify({'reply': reply})
+            elif cmd == '/help':
+                help_text = """🧠 *AWESOME AI — ПОМОЩЬ*
+
+🌐 *Что я умею:*
+• 🔍 Ищу в Google, Wikipedia, YouTube, Telegram, VK, Twitch
+• 🌤 Погода с прогнозом
+• 💵 Курс валют и криптовалют
+• 🧮 Решаю математику
+• 🐍 Помогаю с программированием
+• 📸 Анализирую изображения
+• 🎨 Генерирую картинки
+
+📋 *Команды:*
+/status — Статус
+/premium — Premium
+/test — Пробный Premium
+/profile — Профиль
+/stats — Статистика
+/help — Помощь
+/clear — Очистить историю
+/history — Показать историю
+/weather [город] — Погода
+/exchange — Курс валют
+/crypto — Криптовалюты
+/draw [описание] — Сгенерировать картинку
+
+💎 *Лимиты:*
+🔓 Бесплатно — 20 сообщений/день
+💎 Premium — ♾️ БЕЗЛИМИТНО"""
+                return jsonify({'reply': help_text})
+            elif cmd.startswith('/weather'):
+                city = extract_city_from_query(message)
+                if city:
+                    weather = get_weather(city)
+                    if weather:
+                        return jsonify({'reply': weather})
+                    else:
+                        return jsonify({'reply': f"🌐 Не нашёл город '{city}'. Попробуй ещё."})
+                else:
+                    return jsonify({'reply': "🌐 В каком городе? Напиши: /weather [город]"})
+            elif cmd == '/exchange':
+                rates = get_exchange_rates()
+                if rates:
+                    return jsonify({'reply': rates})
+                else:
+                    return jsonify({'reply': "💵 Не удалось получить курс валют."})
+            elif cmd == '/crypto':
+                crypto = get_crypto_rates()
+                if crypto:
+                    return jsonify({'reply': crypto})
+                else:
+                    return jsonify({'reply': "🪙 Не удалось получить курс криптовалют."})
+            elif cmd.startswith('/draw'):
+                prompt = message.replace('/draw', '').strip()
+                if not prompt:
+                    return jsonify({'reply': "❌ Напиши: /draw [описание]"})
+                title = fix_title(prompt)
+                image_data = generate_image(prompt)
+                if image_data:
+                    import base64 as b64
+                    b64_img = b64.b64encode(image_data).decode('utf-8')
+                    reply = f"🎨 *{title}*\n\n![image](data:image/png;base64,{b64_img})"
+                    return jsonify({'reply': reply})
+                else:
+                    return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
+            else:
+                # Неизвестная команда — пропускаем в обычную обработку
+                pass
+
+        # Если не команда, обрабатываем как обычный вопрос с историей
+        response = process_message_with_history(user_id, message)
+        if response:
+            increment_messages(user_id)
+            return jsonify({'reply': response})
+        else:
+            return jsonify({'reply': "❌ Не удалось обработать запрос."})
+
+    except Exception as e:
+        print(f"Ошибка в /api/chat: {e}")
+        return jsonify({'error': str(e)})
+
+@app.route('/api/analyze_image', methods=['POST'])
+def analyze_image():
+    try:
+        data = request.json
+        image_base64 = data.get('image')
+        user_id = data.get('user_id', 1)
+        if not image_base64:
+            return jsonify({'error': 'Нет изображения'})
+        file_content = base64.b64decode(image_base64)
+        description = analyze_image_from_file(file_content)
+        if not can_send_message(user_id):
+            return jsonify({'reply': "🔴 Лимит! Купи Premium: /premium"})
+        result = process_message_with_history(user_id, "Что на этом изображении? " + description, description)
+        increment_messages(user_id)
+        return jsonify({'reply': result})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
 @app.route('/admin')
 def admin_panel():
     user_id = request.args.get('user_id', type=int)
@@ -994,7 +2249,6 @@ def admin_panel():
     if action == 'unmute' and target_id:
         unmute_user(target_id)
 
-    # Получаем всех пользователей
     if use_supabase:
         try:
             response = supabase.table('users_web').select('*').order('user_id', desc=True).execute()
@@ -1007,7 +2261,6 @@ def admin_panel():
         c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at, premium_expires FROM users_web ORDER BY user_id DESC')
         users = c.fetchall()
         conn.close()
-        # Преобразуем в словари для единообразия
         users = [{'user_id': u[0], 'username': u[1], 'premium': u[2], 'messages_today': u[3], 'is_admin': u[4], 'test_used': u[5], 'joined_at': u[6], 'premium_expires': u[7]} for u in users]
 
     rows = ""
@@ -1071,8 +2324,8 @@ def admin_panel():
         <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
         <div class="stats">
             <div class="card"><span>👥 Всего</span><div class="num">{len(users)}</div></div>
-            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u['premium'] == 1)}</div></div>
-            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u['is_admin'] == 1)}</div></div>
+            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u.get('premium', 0) == 1)}</div></div>
+            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u.get('is_admin', 0) == 1)}</div></div>
         </div>
         <table>
             <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th><th>Premium до</th><th>Действия</th></tr></thead>
