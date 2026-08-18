@@ -38,7 +38,7 @@ def after_request(response):
 # ============================================================
 # ПРАВИЛЬНЫЕ КЛЮЧИ - БЕЗ ПРОБЕЛА!
 # ============================================================
-SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"  # <-- ВОТ ЗДЕСЬ! БЕЗ ПРОБЕЛА!
+SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"  # <-- ЗДЕСЬ БЕЗ ПРОБЕЛА!
 
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
 
