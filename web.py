@@ -1382,7 +1382,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     if not response:
         try:
             response = generate_with_yandexgpt(user_text, system_prompt)
-        except:
+    except:
         pass
     if not response:
         response = generate_fallback_response(user_text, search_result)
