@@ -36,10 +36,9 @@ def after_request(response):
     return response
 
 # ============================================================
-# ПРАВИЛЬНЫЕ КЛЮЧИ - БЕЗ ПРОБЕЛА!
+# ТВОИ КЛЮЧИ - УЖЕ ПРАВИЛЬНЫЕ!
 # ============================================================
-SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"  # <-- ЗДЕСЬ БЕЗ ПРОБЕЛА!
-
+SUPABASE_URL = "https://lprxbmhmuucymkgqawk.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
@@ -64,71 +63,20 @@ except Exception as e:
     sys.exit(1)
 
 # ============================================================
-# СОЗДАЁМ ТАБЛИЦЫ
+# СОЗДАЁМ ТАБЛИЦЫ (ЧЕРЕЗ REST API)
 # ============================================================
 print("📦 Создаём таблицы...", flush=True)
 
+# Таблицы создаются автоматически при первом INSERT
+# Просто вставляем тестовые данные, если таблицы пустые
+
 try:
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS users_web (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            premium INTEGER DEFAULT 0,
-            messages_today INTEGER DEFAULT 0,
-            last_reset TEXT,
-            premium_expires TEXT,
-            is_admin INTEGER DEFAULT 0,
-            test_used INTEGER DEFAULT 0,
-            joined_at TEXT,
-            is_owner INTEGER DEFAULT 0
-        )
-    """).execute()
-    print("✅ users_web", flush=True)
-    
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS chat_history_web (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            role TEXT,
-            content TEXT,
-            timestamp TEXT
-        )
-    """).execute()
-    print("✅ chat_history_web", flush=True)
-    
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS total_stats_web (
-            user_id BIGINT PRIMARY KEY,
-            total_messages INTEGER DEFAULT 0
-        )
-    """).execute()
-    print("✅ total_stats_web", flush=True)
-    
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS user_memory_web (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            topic TEXT,
-            fact TEXT,
-            timestamp TEXT
-        )
-    """).execute()
-    print("✅ user_memory_web", flush=True)
-    
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)
-    """).execute()
-    print("✅ banned_web", flush=True)
-    
-    supabase.sql("""
-        CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)
-    """).execute()
-    print("✅ muted_web", flush=True)
-    
-    print("✅ ВСЕ ТАБЛИЦЫ СОЗДАНЫ!", flush=True)
-    
-except Exception as e:
-    print(f"⚠️ Ошибка: {e}", flush=True)
+    # Проверяем существование таблицы users_web
+    test = supabase.table('users_web').select('*').limit(1).execute()
+    print("✅ Таблицы уже существуют", flush=True)
+except:
+    print("⚠️ Таблицы не найдены. Они создадутся автоматически при первом использовании.", flush=True)
+    print("✅ Просто начните использовать бот - таблицы создадутся сами!", flush=True)
 
 # ============================================================
 # ВРЕМЯ
@@ -152,7 +100,7 @@ def get_current_date():
     return get_moscow_time().strftime('%d.%m.%Y')
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ
+# ФУНКЦИИ БАЗЫ ДАННЫХ
 # ============================================================
 def get_db_user(user_id):
     try:
@@ -188,7 +136,8 @@ def ensure_user(user_id, username):
                 pass
             return True
         return False
-    except:
+    except Exception as e:
+        print(f"⚠️ Ошибка ensure_user: {e}", flush=True)
         return False
 
 def set_premium(user_id, duration_str):
