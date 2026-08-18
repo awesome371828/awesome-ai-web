@@ -10,7 +10,6 @@ import random
 import urllib.parse
 import base64
 import io
-import tempfile
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
@@ -1293,7 +1292,6 @@ def analyze_image_from_file(file_content):
         width, height = img.size
         format_img = img.format or "Unknown"
         description = f"📸 *Анализ:* {width}×{height}, {format_img}\n"
-        # Можно добавить Yandex Vision, но для простоты оставим базовый анализ
         return description
     except:
         return "⚠️ Не удалось проанализировать изображение."
@@ -1358,7 +1356,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ (полностью идентичен предыдущему, но без speech_recognition)
+# HTML ТЕМПЛЕЙТ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
