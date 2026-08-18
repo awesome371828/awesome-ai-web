@@ -24,7 +24,11 @@ from PIL import Image, ImageEnhance, ImageFilter
 import urllib3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from supabase import create_client, Client
+try:
+    from supabase import create_client, Client
+except:
+    create_client = None
+    print("⚠️ Supabase не установлен, используем SQLite", flush=True)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -49,7 +53,7 @@ if not YANDEX_API_KEY:
 
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
 GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")
-OWNER_ID = 1787063701739
+OWNER_ID = 6652898792
 
 FREE_LIMIT = 20
 PREMIUM_LIMIT = 999999999
@@ -60,21 +64,28 @@ SEARCH_TIMEOUT = 3
 WEATHER_TIMEOUT = 2
 
 # ============================================================
-# SUPABASE
+# SUPABASE - ПЫТАЕМСЯ ПОДКЛЮЧИТЬ, НО ЕСЛИ НЕ ПОЛУЧАЕТСЯ - SQLITE
 # ============================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 
 use_supabase = False
-try:
-    if SUPABASE_URL and SUPABASE_KEY:
+supabase = None
+
+if create_client and SUPABASE_URL and SUPABASE_KEY:
+    try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Пробуем подключиться
+        supabase.table('users_web').select('*').limit(1).execute()
         print("✅ Supabase подключен!", flush=True)
         use_supabase = True
-    else:
-        print("⚠️ SUPABASE_URL или SUPABASE_KEY не заданы!", flush=True)
-except Exception as e:
-    print(f"❌ Ошибка Supabase: {e}", flush=True)
+    except Exception as e:
+        print(f"⚠️ Supabase НЕ ДОСТУПЕН: {e}", flush=True)
+        print("✅ Используем SQLite базу данных", flush=True)
+        use_supabase = False
+        supabase = None
+else:
+    print("⚠️ Supabase не настроен, используем SQLite", flush=True)
 
 # ============================================================
 # КЭШ
@@ -118,9 +129,9 @@ def get_current_date_full():
     return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
 
 # ============================================================
-# БАЗА ДАННЫХ
+# SQLite БАЗА ДАННЫХ (ОСНОВНАЯ)
 # ============================================================
-def init_db_local():
+def init_db():
     conn = sqlite3.connect('users_web.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users_web (
@@ -167,131 +178,16 @@ def init_db_local():
     )''')
     conn.commit()
     conn.close()
-    print("✅ SQLite база создана")
+    print("✅ SQLite база создана/проверена", flush=True)
 
-def init_db_web():
-    if use_supabase:
-        try:
-            supabase.table('users_web').select('*').limit(1).execute()
-            print("✅ Supabase таблицы уже есть")
-        except:
-            print("Создаём таблицы в Supabase...")
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS users_web (
-                        user_id BIGINT PRIMARY KEY,
-                        username TEXT,
-                        premium INTEGER DEFAULT 0,
-                        messages_today INTEGER DEFAULT 0,
-                        last_reset TEXT,
-                        premium_expires TEXT,
-                        is_admin INTEGER DEFAULT 0,
-                        test_used INTEGER DEFAULT 0,
-                        joined_at TEXT,
-                        is_owner INTEGER DEFAULT 0
-                    )
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS total_stats_web (
-                        user_id BIGINT PRIMARY KEY,
-                        total_messages INTEGER DEFAULT 0
-                    )
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS premium_orders_web (
-                        order_id SERIAL PRIMARY KEY,
-                        user_id BIGINT,
-                        status TEXT DEFAULT 'pending',
-                        created_at TEXT
-                    )
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS support_requests_web (
-                        request_id SERIAL PRIMARY KEY,
-                        user_id BIGINT,
-                        username TEXT,
-                        text TEXT,
-                        status TEXT DEFAULT 'pending',
-                        created_at TEXT
-                    )
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS chat_history_web (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT,
-                        role TEXT,
-                        content TEXT,
-                        timestamp TEXT
-                    )
-                """).execute()
-            except: pass
-            try:
-                supabase.sql("""
-                    CREATE TABLE IF NOT EXISTS user_memory_web (
-                        id SERIAL PRIMARY KEY,
-                        user_id BIGINT,
-                        topic TEXT,
-                        fact TEXT,
-                        timestamp TEXT
-                    )
-                """).execute()
-            except: pass
-    else:
-        init_db_local()
-
-def init_memory_db():
-    conn = sqlite3.connect('memory_web.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS memory_web (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        topic TEXT,
-        fact TEXT,
-        timestamp TEXT
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS personality_web (
-        user_id INTEGER PRIMARY KEY,
-        style TEXT,
-        mood TEXT,
-        last_interaction TEXT
-    )''')
-    conn.commit()
-    conn.close()
-
-init_db_web()
-init_memory_db()
+# Инициализируем БД сразу
+init_db()
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ
+# ФУНКЦИИ БАЗЫ ДАННЫХ (ТОЛЬКО SQLite для надёжности)
 # ============================================================
 def get_db_user(user_id):
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0]
-            return None
-        except:
-            return None
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
@@ -301,39 +197,12 @@ def get_db_user(user_id):
             columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'is_owner']
             return dict(zip(columns, result))
         return None
+    except Exception as e:
+        print(f"⚠️ Ошибка get_db_user: {e}", flush=True)
+        return None
 
 def ensure_user(user_id, username):
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
-            if not response.data:
-                joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
-                is_owner = 1 if user_id == OWNER_ID else 0
-                data = {
-                    'user_id': user_id,
-                    'username': username,
-                    'messages_today': 0,
-                    'last_reset': get_moscow_time().strftime('%Y-%m-%d'),
-                    'is_admin': is_owner,
-                    'test_used': 0,
-                    'joined_at': joined_at,
-                    'is_owner': is_owner,
-                    'premium': 0,
-                    'premium_expires': None
-                }
-                supabase.table('users_web').insert(data).execute()
-                try:
-                    supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 0}).execute()
-                except:
-                    pass
-                return True
-            else:
-                supabase.table('users_web').update({'username': username}).eq('user_id', user_id).execute()
-                return False
-        except Exception as e:
-            print(f"⚠️ Supabase ошибка: {e}")
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
@@ -354,6 +223,9 @@ def ensure_user(user_id, username):
             conn.commit()
             conn.close()
             return False
+    except Exception as e:
+        print(f"⚠️ Ошибка ensure_user: {e}", flush=True)
+        return False
 
 def set_premium(user_id, duration_str):
     now = get_moscow_time()
@@ -370,19 +242,14 @@ def set_premium(user_id, duration_str):
     else:
         return False
 
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
-            current_expires = response.data[0].get('premium_expires') if response.data else None
-        except:
-            current_expires = None
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
         result = c.fetchone()
-        conn.close()
         current_expires = result[0] if result else None
+    except:
+        current_expires = None
 
     if current_expires:
         try:
@@ -397,58 +264,31 @@ def set_premium(user_id, duration_str):
     else:
         expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
 
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'premium': 1, 'premium_expires': expires}).eq('user_id', user_id).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('UPDATE users_web SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def remove_premium(user_id):
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('UPDATE users_web SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def get_premium_status(user_id):
     if user_id == OWNER_ID:
         return True
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium, premium_expires').eq('user_id', user_id).execute()
-            if response.data:
-                premium = response.data[0].get('premium', 0)
-                expires = response.data[0].get('premium_expires')
-                if premium == 1 and expires:
-                    try:
-                        expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-                        expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
-                        if get_moscow_time() > expires_date:
-                            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
-                            return False
-                    except:
-                        return premium == 1
-                return premium == 1
-            return False
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT premium, premium_expires FROM users_web WHERE user_id = ?', (user_id,))
@@ -467,42 +307,32 @@ def get_premium_status(user_id):
             except:
                 return premium == 1
         return premium == 1
+    except:
+        return False
 
 def get_premium_expires(user_id):
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0].get('premium_expires')
-            return None
-        except:
-            return None
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         conn.close()
         return result[0] if result else None
+    except:
+        return None
 
 def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('is_admin').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0].get('is_admin', 0) == 1
-            return False
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT is_admin FROM users_web WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         conn.close()
         return result is not None and result[0] == 1
+    except:
+        return False
 
 def can_send_message(user_id):
     if user_id == OWNER_ID or is_admin(user_id):
@@ -510,19 +340,7 @@ def can_send_message(user_id):
     if is_banned(user_id):
         return False
     reset_messages_if_needed(user_id)
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('messages_today, premium').eq('user_id', user_id).execute()
-            if response.data:
-                messages = response.data[0].get('messages_today', 0)
-                premium = response.data[0].get('premium', 0)
-                if premium == 1:
-                    return True
-                return messages < FREE_LIMIT
-            return True
-        except:
-            return True
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT messages_today, premium FROM users_web WHERE user_id = ?', (user_id,))
@@ -534,137 +352,91 @@ def can_send_message(user_id):
         if premium == 1:
             return True
         return messages < FREE_LIMIT
+    except:
+        return True
 
 def increment_messages(user_id):
     if user_id == OWNER_ID or is_admin(user_id):
         return
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('messages_today').eq('user_id', user_id).execute()
-            if response.data:
-                current = response.data[0].get('messages_today', 0)
-                supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
-                try:
-                    stat_resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
-                    if stat_resp.data:
-                        total = stat_resp.data[0].get('total_messages', 0)
-                        supabase.table('total_stats_web').update({'total_messages': total + 1}).eq('user_id', user_id).execute()
-                    else:
-                        supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 1}).execute()
-                except:
-                    pass
-        except:
-            pass
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('UPDATE users_web SET messages_today = messages_today + 1 WHERE user_id = ?', (user_id,))
         c.execute('UPDATE total_stats_web SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+    except Exception as e:
+        print(f"⚠️ Ошибка increment_messages: {e}", flush=True)
 
 def is_banned(user_id):
-    if use_supabase:
-        try:
-            response = supabase.table('banned_web').select('*').eq('user_id', user_id).execute()
-            return bool(response.data)
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT 1 FROM banned_web WHERE user_id = ?', (user_id,))
         result = c.fetchone()
         conn.close()
         return result is not None
+    except:
+        return False
 
 def ban_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('banned_web').insert({'user_id': user_id}).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('INSERT OR IGNORE INTO banned_web (user_id) VALUES (?)', (user_id,))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def unban_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('banned_web').delete().eq('user_id', user_id).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('DELETE FROM banned_web WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def mute_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('muted_web').insert({'user_id': user_id}).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('INSERT OR IGNORE INTO muted_web (user_id) VALUES (?)', (user_id,))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def unmute_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('muted_web').delete().eq('user_id', user_id).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('DELETE FROM muted_web WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def set_admin(user_id, is_admin_flag):
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'is_admin': 1 if is_admin_flag else 0}).eq('user_id', user_id).execute()
-            return True
-        except:
-            return False
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('UPDATE users_web SET is_admin = ? WHERE user_id = ?', (1 if is_admin_flag else 0, user_id))
         conn.commit()
         conn.close()
         return True
+    except:
+        return False
 
 def reset_messages_if_needed(user_id):
     today = get_moscow_time().strftime('%Y-%m-%d')
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('last_reset').eq('user_id', user_id).execute()
-            if response.data:
-                last_reset = response.data[0].get('last_reset')
-                if last_reset != today:
-                    supabase.table('users_web').update({'messages_today': 0, 'last_reset': today}).eq('user_id', user_id).execute()
-        except:
-            pass
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT last_reset FROM users_web WHERE user_id = ?', (user_id,))
@@ -675,45 +447,25 @@ def reset_messages_if_needed(user_id):
                 c.execute('UPDATE users_web SET messages_today = 0, last_reset = ? WHERE user_id = ?', (today, user_id))
                 conn.commit()
         conn.close()
+    except:
+        pass
 
 # ============================================================
-# ПАМЯТЬ
+# ПАМЯТЬ (SQLite)
 # ============================================================
 def remember(user_id, topic, fact):
-    if use_supabase:
-        try:
-            supabase.table('user_memory_web').insert({
-                'user_id': user_id,
-                'topic': topic.lower(),
-                'fact': fact,
-                'timestamp': get_moscow_time().isoformat()
-            }).execute()
-        except:
-            pass
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('INSERT INTO user_memory_web (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
                   (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
         conn.commit()
         conn.close()
+    except:
+        pass
 
 def recall(user_id, topic):
-    if use_supabase:
-        try:
-            response = supabase.table('user_memory_web') \
-                .select('fact') \
-                .eq('user_id', user_id) \
-                .ilike('topic', f'%{topic.lower()}%') \
-                .order('id', desc=True) \
-                .limit(3) \
-                .execute()
-            if response.data:
-                return [f"🧠 {r['fact']}" for r in response.data]
-            return []
-        except:
-            return []
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 3',
@@ -723,44 +475,23 @@ def recall(user_id, topic):
         if results:
             return [f"🧠 {r[0]}" for r in results]
         return []
+    except:
+        return []
 
 def save_message(user_id, role, content):
     timestamp = get_moscow_time().isoformat()
-    if use_supabase:
-        try:
-            supabase.table('chat_history_web').insert({
-                'user_id': user_id,
-                'role': role,
-                'content': content,
-                'timestamp': timestamp
-            }).execute()
-        except Exception as e:
-            print(f"Ошибка сохранения истории: {e}")
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('INSERT INTO chat_history_web (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
                   (user_id, role, content, timestamp))
         conn.commit()
         conn.close()
+    except Exception as e:
+        print(f"⚠️ Ошибка сохранения истории: {e}", flush=True)
 
 def get_history(user_id, limit=10):
-    if use_supabase:
-        try:
-            response = supabase.table('chat_history_web') \
-                .select('role, content') \
-                .eq('user_id', user_id) \
-                .order('id', desc=True) \
-                .limit(limit) \
-                .execute()
-            if response.data:
-                history = list(reversed(response.data))
-                return history
-            return []
-        except Exception as e:
-            print(f"Ошибка получения истории: {e}")
-            return []
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('SELECT role, content FROM chat_history_web WHERE user_id = ? ORDER BY id DESC LIMIT ?',
@@ -769,19 +500,19 @@ def get_history(user_id, limit=10):
         conn.close()
         history = [{'role': row[0], 'content': row[1]} for row in reversed(rows)]
         return history
+    except Exception as e:
+        print(f"⚠️ Ошибка получения истории: {e}", flush=True)
+        return []
 
 def clear_history(user_id):
-    if use_supabase:
-        try:
-            supabase.table('chat_history_web').delete().eq('user_id', user_id).execute()
-        except:
-            pass
-    else:
+    try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
         c.execute('DELETE FROM chat_history_web WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
+    except:
+        pass
 
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -828,38 +559,6 @@ def get_crypto_rates():
             return f"🪙 BTC: ${btc:,}\n💠 ETH: ${eth:,}\n☀️ SOL: ${sol:,}"
     except:
         pass
-    return None
-
-def solve_math(text):
-    text_lower = text.lower().strip()
-    if not re.search(r'\d', text_lower):
-        return None
-    if any(kw in text_lower for kw in ['кто', 'что', 'где', 'когда', 'почему', 'зачем', 'праздник', 'погода', 'курс']):
-        return None
-    
-    clean_text = text_lower
-    for word in ['сколько', 'будет', 'сколько будет', 'посчитай', 'реши', 'пример', 'скок', 'равно']:
-        clean_text = clean_text.replace(word, '').strip()
-    
-    clean_text = clean_text.replace(' ', '').replace('плюс', '+').replace('минус', '-')
-    clean_text = clean_text.replace('умножить', '*').replace('разделить', '/')
-    clean_text = clean_text.replace('х', '*').replace('×', '*').replace('÷', '/')
-    
-    if not re.search(r'[+\-*/]', clean_text):
-        return None
-    
-    expr = re.sub(r'[^0-9+\-*/()=.]', '', clean_text)
-    if expr and len(expr) > 1:
-        try:
-            if any(op in expr for op in ['__', 'import', 'eval', 'exec']):
-                return None
-            result = eval(expr)
-            if result == int(result):
-                return str(int(result))
-            else:
-                return str(round(result, 2))
-        except:
-            pass
     return None
 
 def extract_city_from_query(text):
@@ -1118,7 +817,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ
+# HTML ТЕМПЛЕЙТ (КРАТКИЙ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1797,7 +1496,6 @@ HTML_TEMPLATE = """
         document.addEventListener('DOMContentLoaded', function() {
             input.focus();
             
-            // Enter
             input.addEventListener('keydown', function(e) {
                 if (e.key === 'Enter') {
                     e.preventDefault();
@@ -1805,7 +1503,6 @@ HTML_TEMPLATE = """
                 }
             });
             
-            // Кнопка отправки
             sendBtn.addEventListener('click', function(e) {
                 e.preventDefault();
                 handleSend();
@@ -1833,7 +1530,7 @@ def chat():
         message = data.get('message', '')
         user_id = data.get('user_id', 1)
         
-        print(f"📩 Получено сообщение от {user_id}: {message[:50]}...")
+        print(f"📩 Получено сообщение от {user_id}: {message[:50]}...", flush=True)
         
         if not message:
             return jsonify({'error': 'Напиши что-нибудь!'})
@@ -1891,42 +1588,25 @@ def chat():
                     reply = "💎 *PREMIUM AWESOME AI*\n\n🔥 *ЧТО ТЫ ПОЛУЧАЕШЬ:*\n♾️ *БЕЗЛИМИТНЫЕ СООБЩЕНИЯ*\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n\n💰 *Цена: 100₽/месяц*\n🎁 Попробуй /test"
                 return jsonify({'reply': reply})
             elif cmd == '/test':
-                if use_supabase:
-                    try:
-                        response = supabase.table('users_web').select('test_used, premium').eq('user_id', user_id).execute()
-                        if response.data:
-                            test_used = response.data[0].get('test_used', 0)
-                            premium = response.data[0].get('premium', 0)
-                        else:
-                            return jsonify({'reply': '❌ Пользователь не найден'})
-                    except:
-                        return jsonify({'reply': '❌ Ошибка БД'})
-                else:
-                    conn = sqlite3.connect('users_web.db')
-                    c = conn.cursor()
-                    c.execute('SELECT test_used, premium FROM users_web WHERE user_id = ?', (user_id,))
-                    result = c.fetchone()
-                    conn.close()
-                    if not result:
-                        return jsonify({'reply': '❌ Пользователь не найден'})
-                    test_used, premium = result
+                conn = sqlite3.connect('users_web.db')
+                c = conn.cursor()
+                c.execute('SELECT test_used, premium FROM users_web WHERE user_id = ?', (user_id,))
+                result = c.fetchone()
+                conn.close()
+                if not result:
+                    return jsonify({'reply': '❌ Пользователь не найден'})
+                test_used, premium = result
 
                 if get_premium_status(user_id):
                     return jsonify({'reply': '💎 У тебя уже есть Premium!'})
                 if test_used == 1:
                     return jsonify({'reply': '⛔ Ты уже использовал тест Premium!\nКупи Premium: /premium'})
                 if set_premium(user_id, "2d"):
-                    if use_supabase:
-                        try:
-                            supabase.table('users_web').update({'test_used': 1}).eq('user_id', user_id).execute()
-                        except:
-                            pass
-                    else:
-                        conn = sqlite3.connect('users_web.db')
-                        c = conn.cursor()
-                        c.execute('UPDATE users_web SET test_used = 1 WHERE user_id = ?', (user_id,))
-                        conn.commit()
-                        conn.close()
+                    conn = sqlite3.connect('users_web.db')
+                    c = conn.cursor()
+                    c.execute('UPDATE users_web SET test_used = 1 WHERE user_id = ?', (user_id,))
+                    conn.commit()
+                    conn.close()
                     reply = "🎉 *ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!*\n\n✅ Приоритетная обработка\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Более качественные ответы\n\n⏳ Доступ активен 48 часов.\n🔥 Наслаждайся!"
                     return jsonify({'reply': reply})
                 else:
@@ -1965,19 +1645,12 @@ def chat():
                 return jsonify({'reply': reply})
             elif cmd == '/stats':
                 if user_id == OWNER_ID or is_admin(user_id):
-                    if use_supabase:
-                        try:
-                            response = supabase.table('users_web').select('*').execute()
-                            users = response.data
-                        except:
-                            users = []
-                    else:
-                        conn = sqlite3.connect('users_web.db')
-                        c = conn.cursor()
-                        c.execute('SELECT * FROM users_web')
-                        users = c.fetchall()
-                        conn.close()
-                        users = [{'user_id': u[0], 'premium': u[2], 'is_admin': u[6]} for u in users]
+                    conn = sqlite3.connect('users_web.db')
+                    c = conn.cursor()
+                    c.execute('SELECT * FROM users_web')
+                    users = c.fetchall()
+                    conn.close()
+                    users = [{'user_id': u[0], 'premium': u[2], 'is_admin': u[6]} for u in users]
                     total_users = len(users)
                     premium_users = sum(1 for u in users if u.get('premium', 0) == 1)
                     admin_users = sum(1 for u in users if u.get('is_admin', 0) == 1)
@@ -1997,19 +1670,12 @@ def chat():
                             remaining = 0
                         status = "🔓 Бесплатный"
                         limit_text = f"{remaining}/{FREE_LIMIT}"
-                    if use_supabase:
-                        try:
-                            resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
-                            total = resp.data[0].get('total_messages', 0) if resp.data else 0
-                        except:
-                            total = 0
-                    else:
-                        conn = sqlite3.connect('users_web.db')
-                        c = conn.cursor()
-                        c.execute('SELECT total_messages FROM total_stats_web WHERE user_id = ?', (user_id,))
-                        result = c.fetchone()
-                        conn.close()
-                        total = result[0] if result else 0
+                    conn = sqlite3.connect('users_web.db')
+                    c = conn.cursor()
+                    c.execute('SELECT total_messages FROM total_stats_web WHERE user_id = ?', (user_id,))
+                    result = c.fetchone()
+                    conn.close()
+                    total = result[0] if result else 0
                     reply = f"📊 *ТВОЯ СТАТИСТИКА*\n\n👤 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages_today}\n📊 Всего: {total}"
                 return jsonify({'reply': reply})
             elif cmd == '/help':
@@ -2086,7 +1752,7 @@ def chat():
             return jsonify({'reply': "❌ Не удалось обработать запрос."})
 
     except Exception as e:
-        print(f"❌ Ошибка в /api/chat: {e}")
+        print(f"❌ Ошибка в /api/chat: {e}", flush=True)
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)})
@@ -2108,7 +1774,7 @@ def analyze_image():
         increment_messages(user_id)
         return jsonify({'reply': description})
     except Exception as e:
-        print(f"❌ Ошибка в /api/analyze_image: {e}")
+        print(f"❌ Ошибка в /api/analyze_image: {e}", flush=True)
         return jsonify({'error': str(e)})
 
 @app.route('/api/speech_to_text', methods=['POST', 'OPTIONS'])
@@ -2126,7 +1792,7 @@ def speech_to_text_endpoint():
         # Пока заглушка - нужно интегрировать STT
         return jsonify({'text': '🎤 Голосовое сообщение получено! (распознавание в разработке)'})
     except Exception as e:
-        print(f"❌ Ошибка в /api/speech_to_text: {e}")
+        print(f"❌ Ошибка в /api/speech_to_text: {e}", flush=True)
         return jsonify({'error': str(e)})
 
 @app.route('/admin')
@@ -2161,19 +1827,12 @@ def admin_panel():
     if action == 'unmute' and target_id:
         unmute_user(target_id)
 
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('*').order('user_id', desc=True).execute()
-            users = response.data
-        except:
-            users = []
-    else:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at, premium_expires FROM users_web ORDER BY user_id DESC')
-        users = c.fetchall()
-        conn.close()
-        users = [{'user_id': u[0], 'username': u[1], 'premium': u[2], 'messages_today': u[3], 'is_admin': u[4], 'test_used': u[5], 'joined_at': u[6], 'premium_expires': u[7]} for u in users]
+    conn = sqlite3.connect('users_web.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at, premium_expires FROM users_web ORDER BY user_id DESC')
+    users = c.fetchall()
+    conn.close()
+    users = [{'user_id': u[0], 'username': u[1], 'premium': u[2], 'messages_today': u[3], 'is_admin': u[4], 'test_used': u[5], 'joined_at': u[6], 'premium_expires': u[7]} for u in users]
 
     rows = ""
     for u in users:
@@ -2252,17 +1911,17 @@ def admin_panel():
 # ============================================================
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
-    print("=" * 60)
-    print("🧠 AWESOME AI 2026 — ВЕБ-ВЕРСИЯ")
-    print("=" * 60)
-    print(f"👑 Владелец ID: {OWNER_ID}")
-    print(f"🌐 http://0.0.0.0:{port}")
-    print("=" * 60)
-    print("✅ Supabase: " + ("ПОДКЛЮЧЕН" if use_supabase else "НЕ ПОДКЛЮЧЕН (SQLite)"))
-    print("✅ Анимированные частицы")
-    print("✅ Память диалога")
-    print("✅ Распознавание фото")
-    print("✅ Распознавание голоса")
-    print("✅ Все команды")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print("🧠 AWESOME AI 2026 — ВЕБ-ВЕРСИЯ", flush=True)
+    print("=" * 60, flush=True)
+    print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
+    print(f"🌐 http://0.0.0.0:{port}", flush=True)
+    print("=" * 60, flush=True)
+    print("✅ Используется SQLite (локальная база данных)", flush=True)
+    print("✅ Анимированные частицы", flush=True)
+    print("✅ Память диалога", flush=True)
+    print("✅ Распознавание фото", flush=True)
+    print("✅ Распознавание голоса (в разработке)", flush=True)
+    print("✅ Все команды", flush=True)
+    print("=" * 60, flush=True)
     app.run(host='0.0.0.0', port=port, debug=True)
