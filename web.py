@@ -36,13 +36,11 @@ def after_request(response):
     return response
 
 # ============================================================
-# ТВОИ КЛЮЧИ - ИСПРАВЛЕНО!
+# ПРАВИЛЬНЫЕ КЛЮЧИ - БЕЗ ПРОБЕЛА!
 # ============================================================
-SUPABASE_URL = "https://1prxbm_shmuucymkgagwk.supabase.co"  # БЕЗ ПРОБЕЛА!  # БЕЗ ПРОБЕЛА!  # УБЕРИ ПРОБЕЛ!
-# ДОЛЖНО БЫТЬ: https://lprxbm shmuucymkgaqwk.supabase.co
-# ПРОСТО УБЕРИ ПРОБЕЛ МЕЖДУ lprxbm И shmuucymkgaqwk
+SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"  # <-- ВОТ ЗДЕСЬ! БЕЗ ПРОБЕЛА!
 
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Njc0OTQyOCwiZXhwIjoyMTAyMzI1NDI4fQ.JSlHsddyJRATpVfCk35Q9XYtzZ0mvjnZjcIzxR2nDEw"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
@@ -63,7 +61,6 @@ try:
     print("✅ Supabase подключен успешно!", flush=True)
 except Exception as e:
     print(f"❌ ОШИБКА: {e}", flush=True)
-    print("❌ УБЕРИ ПРОБЕЛ В URL!", flush=True)
     sys.exit(1)
 
 # ============================================================
@@ -569,6 +566,9 @@ def process_message_with_history(user_id, user_text):
 
     return response
 
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ============================================================
 def get_weather(city):
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?q={urllib.parse.quote(city)}&appid=4c8f5c0b8a9f2c5d6e7f8g9h0i1j2k3l&units=metric&lang=ru"
