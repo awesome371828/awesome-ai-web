@@ -544,7 +544,6 @@ def increment_messages(user_id):
             if response.data:
                 current = response.data[0].get('messages_today', 0)
                 supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
-                # Обновляем общую статистику
                 try:
                     stat_resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
                     if stat_resp.data:
@@ -1050,36 +1049,18 @@ def fix_title(prompt):
 # РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ
 # ============================================================
 def analyze_image_with_ai(image_base64):
-    """Анализирует изображение с помощью YandexGPT или GigaChat"""
     try:
-        # Для анализа изображения используем нейросеть с описанием
-        prompt = "Что изображено на этом фото? Опиши подробно, что ты видишь. Если это человек, опиши его внешность, эмоции, одежду. Если это пейзаж, опиши природу, время года, погоду. Если это еда, опиши блюдо. Если это техника, опиши её."
-        
-        system_prompt = "Ты — эксперт по анализу изображений. Опиши, что ты видишь на фото. Будь подробен и точен."
-        
+        prompt = "Что изображено на этом фото? Опиши подробно, что ты видишь."
+        system_prompt = "Ты — эксперт по анализу изображений. Опиши, что ты видишь на фото."
         response = generate_with_gigachat(prompt, system_prompt)
         if response:
             return response
         response = generate_with_yandexgpt(prompt, system_prompt)
         if response:
             return response
-        return "📸 Изображение получено, но не удалось распознать содержимое. Попробуйте описать, что вы отправили."
+        return "📸 Изображение получено, но не удалось распознать содержимое."
     except Exception as e:
         return f"❌ Ошибка при анализе изображения: {str(e)}"
-
-# ============================================================
-# РАСПОЗНАВАНИЕ ГОЛОСА (Speech-to-Text)
-# ============================================================
-def speech_to_text(audio_base64):
-    """Распознает речь из аудио (использует внешнее API или локальный движок)"""
-    try:
-        # Попытка использовать Whisper API или локальный распознаватель
-        # Здесь можно интегрировать Vosk, Whisper, или другие STT сервисы
-        
-        # Простой fallback — эмуляция
-        return None
-    except:
-        return None
 
 # ============================================================
 # ОСНОВНАЯ ОБРАБОТКА
@@ -1099,8 +1080,6 @@ def process_message_with_history(user_id, user_text, image_description=None):
         system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус. Включи режим максимальной проработки!"
     if image_description:
         system_prompt += f"\n\n📸 На изображении: {image_description}"
-        
-        # Сохраняем в память факт об изображении
         remember(user_id, "фото", f"Пользователь отправил фото: {image_description[:100]}")
 
     memories = recall(user_id, user_text)
@@ -1111,9 +1090,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 История диалога:\n{history_text}"
 
-    # Сохраняем важные факты из запроса в память
     if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
-        # Пытаемся извлечь факты о пользователе
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
             remember(user_id, "интересы", user_text[:100])
         elif 'работаю' in user_text.lower() or 'учусь' in user_text.lower():
@@ -1141,7 +1118,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ (КРАСИВЫЙ, С ПОДДЕРЖКОЙ ГОЛОСА И ФОТО)
+# HTML ТЕМПЛЕЙТ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1510,8 +1487,9 @@ HTML_TEMPLATE = """
             <button onclick="sendCommand('/clear')">🗑️</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши..." onkeydown="if(event.key==='Enter') send()" autofocus>
-            <button id="sendBtn" onclick="send()">➤</button>
+            <input id="input" placeholder="Напиши..." autofocus>
+            <button id="sendBtn">➤</button>
+            <button onclick="startRecording()" class="mic-btn" id="micBtn2">🎤</button>
         </div>
     </div>
     
@@ -1592,6 +1570,7 @@ HTML_TEMPLATE = """
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         const micBtn = document.getElementById('micBtn');
+        const micBtn2 = document.getElementById('micBtn2');
         
         let userId = localStorage.getItem('awesome_user_id_web');
         if (!userId) {
@@ -1603,18 +1582,16 @@ HTML_TEMPLATE = """
         let audioChunks = [];
         let isRecording = false;
         
-        function addMessage(text, isUser, isImage = false) {
+        function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            // Поддержка Markdown: жирный, курсив, код, изображения
-            let formatted = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>');
+            let formatted = text.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+            formatted = formatted.replace(/\\*(.*?)\\*/g, '<i>$1</i>');
             formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
-            // Поддержка изображений в формате ![alt](data:image/...)
-            formatted = formatted.replace(/!\[(.*?)\]\((data:image\/[^)]+)\)/g, '<img src="$2" alt="$1">');
-            formatted = formatted.replace(/\n/g, '<br>');
+            formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;margin:4px 0;">');
+            formatted = formatted.replace(/\\n/g, '<br>');
             div.innerHTML = formatted;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
@@ -1632,38 +1609,57 @@ HTML_TEMPLATE = """
             }
         }
         
-        async function send(text = null) {
+        // ===== ОТПРАВКА СООБЩЕНИЙ =====
+        async function sendMessage(text) {
             const messageText = text || input.value.trim();
             if (!messageText) return;
-            if (!text) input.value = '';
+            
+            input.value = '';
             sendBtn.disabled = true;
+            
             addMessage(messageText, true);
             setTyping(true);
+            
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: messageText, user_id: parseInt(userId) })
+                    body: JSON.stringify({ 
+                        message: messageText, 
+                        user_id: parseInt(userId) 
+                    })
                 });
+                
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) addMessage('⚠️ ' + data.error, false);
-                else if (data.reply) addMessage(data.reply, false);
-                else addMessage('⚠️ Пустой ответ', false);
+                
+                if (data.error) {
+                    addMessage('⚠️ ' + data.error, false);
+                } else if (data.reply) {
+                    addMessage(data.reply, false);
+                } else {
+                    addMessage('⚠️ Пустой ответ от сервера', false);
+                }
             } catch (e) {
                 setTyping(false);
                 addMessage('⚠️ Ошибка соединения. Проверьте интернет.', false);
-                console.error(e);
+                console.error('Error:', e);
             }
+            
             sendBtn.disabled = false;
-            if (!text) input.focus();
+            input.focus();
         }
         
-        async function sendCommand(cmd) {
+        function handleSend() {
+            sendMessage();
+        }
+        
+        function sendCommand(cmd) {
             input.value = cmd;
-            await send();
+            sendMessage();
         }
         
+        // ===== ОБРАБОТКА ФАЙЛОВ =====
         function handleFiles(files) {
             for (const file of files) {
                 if (file.type.startsWith('image/')) {
@@ -1676,13 +1672,20 @@ HTML_TEMPLATE = """
                             const response = await fetch('/api/analyze_image', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ image: base64, user_id: parseInt(userId) })
+                                body: JSON.stringify({ 
+                                    image: base64, 
+                                    user_id: parseInt(userId) 
+                                })
                             });
                             const data = await response.json();
                             setTyping(false);
-                            if (data.error) addMessage('⚠️ ' + data.error, false);
-                            else if (data.reply) addMessage(data.reply, false);
-                            else addMessage('⚠️ Не удалось распознать фото', false);
+                            if (data.error) {
+                                addMessage('⚠️ ' + data.error, false);
+                            } else if (data.reply) {
+                                addMessage(data.reply, false);
+                            } else {
+                                addMessage('⚠️ Не удалось распознать фото', false);
+                            }
                         } catch (e) {
                             setTyping(false);
                             addMessage('⚠️ Ошибка обработки фото', false);
@@ -1722,15 +1725,17 @@ HTML_TEMPLATE = """
                             const response = await fetch('/api/speech_to_text', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ audio: base64, user_id: parseInt(userId) })
+                                body: JSON.stringify({ 
+                                    audio: base64, 
+                                    user_id: parseInt(userId) 
+                                })
                             });
                             const data = await response.json();
                             setTyping(false);
                             if (data.error) {
                                 addMessage('⚠️ ' + data.error, false);
                             } else if (data.text) {
-                                // Отправляем распознанный текст как сообщение
-                                await send(data.text);
+                                await sendMessage(data.text);
                             } else {
                                 addMessage('⚠️ Не удалось распознать голос', false);
                             }
@@ -1742,10 +1747,13 @@ HTML_TEMPLATE = """
                     };
                     reader.readAsDataURL(audioBlob);
                     
-                    // Очищаем треки
                     stream.getTracks().forEach(track => track.stop());
                     micBtn.classList.remove('recording');
                     micBtn.textContent = '🎤';
+                    if (micBtn2) {
+                        micBtn2.classList.remove('recording');
+                        micBtn2.textContent = '🎤';
+                    }
                     isRecording = false;
                 };
                 
@@ -1753,6 +1761,10 @@ HTML_TEMPLATE = """
                 isRecording = true;
                 micBtn.classList.add('recording');
                 micBtn.textContent = '⏹️';
+                if (micBtn2) {
+                    micBtn2.classList.add('recording');
+                    micBtn2.textContent = '⏹️';
+                }
                 addMessage('🎤 Запись голоса... Нажмите ещё раз для остановки', true);
             } catch (e) {
                 addMessage('⚠️ Не удалось получить доступ к микрофону. Разрешите доступ в браузере.', false);
@@ -1781,7 +1793,24 @@ HTML_TEMPLATE = """
             `;
         }
         
-        document.addEventListener('DOMContentLoaded', () => input.focus());
+        // ===== НАЗНАЧАЕМ ОБРАБОТЧИКИ =====
+        document.addEventListener('DOMContentLoaded', function() {
+            input.focus();
+            
+            // Enter
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleSend();
+                }
+            });
+            
+            // Кнопка отправки
+            sendBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                handleSend();
+            });
+        });
     </script>
 </body>
 </html>
@@ -1803,6 +1832,9 @@ def chat():
         data = request.json
         message = data.get('message', '')
         user_id = data.get('user_id', 1)
+        
+        print(f"📩 Получено сообщение от {user_id}: {message[:50]}...")
+        
         if not message:
             return jsonify({'error': 'Напиши что-нибудь!'})
 
@@ -2054,7 +2086,9 @@ def chat():
             return jsonify({'reply': "❌ Не удалось обработать запрос."})
 
     except Exception as e:
-        print(f"Ошибка в /api/chat: {e}")
+        print(f"❌ Ошибка в /api/chat: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)})
 
 @app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
@@ -2069,16 +2103,12 @@ def analyze_image():
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
         
-        # Анализируем изображение с помощью AI
         description = analyze_image_with_ai(image_base64)
-        
-        # Сохраняем в память
         remember(user_id, "фото", f"Пользователь отправил фото: {description[:100]}")
-        
         increment_messages(user_id)
         return jsonify({'reply': description})
     except Exception as e:
-        print(f"Ошибка в /api/analyze_image: {e}")
+        print(f"❌ Ошибка в /api/analyze_image: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/api/speech_to_text', methods=['POST', 'OPTIONS'])
@@ -2093,15 +2123,10 @@ def speech_to_text_endpoint():
         if not audio_base64:
             return jsonify({'error': 'Нет аудио'})
         
-        # Пытаемся распознать голос
-        text = speech_to_text(audio_base64)
-        
-        if text:
-            return jsonify({'text': text})
-        else:
-            return jsonify({'error': 'Не удалось распознать голос. Попробуйте написать текстом.'})
+        # Пока заглушка - нужно интегрировать STT
+        return jsonify({'text': '🎤 Голосовое сообщение получено! (распознавание в разработке)'})
     except Exception as e:
-        print(f"Ошибка в /api/speech_to_text: {e}")
+        print(f"❌ Ошибка в /api/speech_to_text: {e}")
         return jsonify({'error': str(e)})
 
 @app.route('/admin')
@@ -2228,7 +2253,7 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 60)
-    print("🧠 AWESOME AI 2026 — ВЕБ-ВЕРСИЯ (КАК В ТГ БОТЕ)")
+    print("🧠 AWESOME AI 2026 — ВЕБ-ВЕРСИЯ")
     print("=" * 60)
     print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"🌐 http://0.0.0.0:{port}")
@@ -2237,7 +2262,7 @@ if __name__ == '__main__':
     print("✅ Анимированные частицы")
     print("✅ Память диалога")
     print("✅ Распознавание фото")
-    print("✅ Распознавание голоса (через браузер)")
+    print("✅ Распознавание голоса")
     print("✅ Все команды")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=True)
