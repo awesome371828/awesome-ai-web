@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sqlite3
 import os
 import sys
 import json
@@ -32,14 +31,26 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 app = Flask(__name__)
+
+# ============================================================
+# CORS - ПРАВИЛЬНАЯ НАСТРОЙКА (ВАЖНО!)
+# ============================================================
 CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # ============================================================
 # НАСТРОЙКА
 # ============================================================
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 if not YANDEX_API_KEY:
-    raise ValueError("❌ YANDEX_API_KEY не найден!")
+    print("⚠️ YANDEX_API_KEY не найден, использую fallback")
+    YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
 GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")
@@ -69,7 +80,7 @@ try:
     else:
         print("⚠️ SUPABASE_URL или SUPABASE_KEY не заданы!", flush=True)
 except Exception as e:
-    print(f"❌ Ошибка подключения к Supabase: {e}", flush=True)
+    print(f"❌ Ошибка Supabase: {e}", flush=True)
 
 # ============================================================
 # КЭШ
@@ -113,7 +124,7 @@ def get_current_date_full():
     return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
 
 # ============================================================
-# БАЗА ДАННЫХ (SQLite + Supabase)
+# БАЗА ДАННЫХ
 # ============================================================
 def init_db_local():
     conn = sqlite3.connect('users_web.db')
@@ -1096,7 +1107,7 @@ def solve_math(text):
     return None
 
 # ============================================================
-# GIGACHAT (ОСНОВНОЙ)
+# GIGACHAT
 # ============================================================
 gigachat_token_cache = None
 gigachat_token_time = 0
@@ -1155,7 +1166,7 @@ def generate_with_gigachat(user_text, system_prompt):
         return None
 
 # ============================================================
-# YANDEXGPT (БАЗА ДАННЫХ ИНТЕРНЕТА)
+# YANDEXGPT
 # ============================================================
 def generate_with_yandexgpt(user_text, system_prompt):
     try:
@@ -1332,7 +1343,7 @@ def analyze_image_from_file(file_content):
         return "⚠️ Не удалось проанализировать изображение."
 
 # ============================================================
-# ОСНОВНАЯ ОБРАБОТКА С ИСТОРИЕЙ
+# ОСНОВНАЯ ОБРАБОТКА
 # ============================================================
 def process_message_with_history(user_id, user_text, image_description=None):
     save_message(user_id, 'user', user_text)
@@ -1382,7 +1393,7 @@ def process_message_with_history(user_id, user_text, image_description=None):
     return response
 
 # ============================================================
-# HTML ТЕМПЛЕЙТ
+# HTML ТЕМПЛЕЙТ (ИСПРАВЛЕННЫЙ — ОТПРАВЛЯЕТ СООБЩЕНИЯ)
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -1860,12 +1871,17 @@ HTML_TEMPLATE = """
                 });
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) addMessage('⚠️ ' + data.error, false);
-                else if (data.reply) addMessage(data.reply, false);
-                else addMessage('⚠️ Пустой ответ', false);
+                if (data.error) {
+                    addMessage('⚠️ ' + data.error, false);
+                } else if (data.reply) {
+                    addMessage(data.reply, false);
+                } else {
+                    addMessage('⚠️ Пустой ответ', false);
+                }
             } catch (e) {
                 setTyping(false);
-                addMessage('⚠️ Ошибка соединения', false);
+                addMessage('⚠️ Ошибка соединения: ' + e.message, false);
+                console.error('Fetch error:', e);
             }
             sendBtn.disabled = false;
             input.focus();
@@ -1896,7 +1912,8 @@ HTML_TEMPLATE = """
                             else if (data.reply) addMessage(data.reply, false);
                         } catch (e) {
                             setTyping(false);
-                            addMessage('⚠️ Ошибка обработки фото', false);
+                            addMessage('⚠️ Ошибка обработки фото: ' + e.message, false);
+                            console.error('Image error:', e);
                         }
                     };
                     reader.readAsDataURL(file);
@@ -1934,8 +1951,11 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/chat', methods=['POST'])
+@app.route('/api/chat', methods=['POST', 'OPTIONS'])
 def chat():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         data = request.json
         message = data.get('message', '')
@@ -2194,8 +2214,11 @@ def chat():
         print(f"Ошибка в /api/chat: {e}")
         return jsonify({'error': str(e)})
 
-@app.route('/api/analyze_image', methods=['POST'])
+@app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
 def analyze_image():
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         data = request.json
         image_base64 = data.get('image')
@@ -2343,6 +2366,6 @@ if __name__ == '__main__':
     print("=" * 60)
     print("✅ Supabase: " + ("ПОДКЛЮЧЕН" if use_supabase else "НЕ ПОДКЛЮЧЕН (используется SQLite)"))
     print("✅ Память диалога включена")
-    print("✅ Все команды работают")
+    print("✅ CORS настроен")
     print("=" * 60)
     app.run(host='0.0.0.0', port=port, debug=False)
