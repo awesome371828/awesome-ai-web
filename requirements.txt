@@ -6,3 +6,4 @@ requests
 beautifulsoup4
 Pillow
 python-dateutil
+gunicorn
