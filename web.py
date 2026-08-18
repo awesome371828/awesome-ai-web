@@ -13,24 +13,26 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
 from flask_cors import CORS
 from dotenv import load_dotenv
+from flask_session import Session
 
 import requests
 import urllib3
-
-try:
-    from supabase import create_client, Client
-    SUPABASE_AVAILABLE = True
-except:
-    SUPABASE_AVAILABLE = False
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'awesome_ai_secret_key_2026')
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['SESSION_PERMANENT'] = False
+app.config['SESSION_USE_SIGNER'] = True
+app.config['SESSION_FILE_DIR'] = './flask_session'
+Session(app)
+
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -43,18 +45,15 @@ def after_request(response):
 # ============================================================
 # КЛЮЧИ
 # ============================================================
-SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
-
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
 GIGACHAT_AUTH_KEY = "MDFhMDBkNmEtMmExNC03M2JkLWFlZmMtOTQ0OWVlOTc5M2U1OmE1ZWJhM2NlLTQwYjAtNDZlYi1iMmY2LTE3OTFmYzhhYTQ2MA=="
 OWNER_ID = 1787063701739
 
-FREE_LIMIT = 20
+FREE_LIMIT = 999999  # Безлимит для теста
 
 # ============================================================
-# SQLite БАЗА ДАННЫХ (ВСЕГДА РАБОТАЕТ!)
+# SQLite БАЗА ДАННЫХ (ДЛЯ ДОЛГОСРОЧНОЙ ПАМЯТИ)
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -96,23 +95,45 @@ def init_db():
 init_db()
 
 # ============================================================
-# ПОДКЛЮЧЕНИЕ К SUPABASE (ПРОБУЕМ, НО ЕСЛИ НЕ ПОЛУЧАЕТСЯ - SQLite)
+# IN-MEMORY КЭШ ДЛЯ ДИАЛОГОВ (ПОКА СЕССИЯ ЖИВА)
 # ============================================================
-use_supabase = False
-supabase = None
+# Храним диалоги в памяти для быстрого доступа
+# Структура: {user_id: [{"role": "user/assistant", "content": "text"}, ...]}
+session_cache = {}
 
-if SUPABASE_AVAILABLE:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        test = supabase.table('users_web').select('*').limit(1).execute()
-        print("✅ Supabase подключен!", flush=True)
-        use_supabase = True
-    except Exception as e:
-        print(f"⚠️ Supabase НЕ ДОСТУПЕН: {e}", flush=True)
-        print("✅ Используем SQLite (локальная база)", flush=True)
-else:
-    print("⚠️ Supabase библиотека не установлена", flush=True)
-    print("✅ Используем SQLite (локальная база)", flush=True)
+def get_session_history(user_id):
+    """Получить историю диалога из сессии"""
+    if user_id not in session_cache:
+        session_cache[user_id] = []
+    return session_cache[user_id]
+
+def add_to_session_history(user_id, role, content):
+    """Добавить сообщение в историю сессии"""
+    if user_id not in session_cache:
+        session_cache[user_id] = []
+    session_cache[user_id].append({"role": role, "content": content})
+    # Ограничиваем историю 50 сообщениями
+    if len(session_cache[user_id]) > 50:
+        session_cache[user_id] = session_cache[user_id][-50:]
+    # Сохраняем в БД для долгосрочной памяти
+    save_message(user_id, role, content)
+
+def clear_session_history(user_id):
+    """Очистить историю сессии"""
+    if user_id in session_cache:
+        session_cache[user_id] = []
+    clear_history(user_id)
+
+def get_full_history(user_id, limit=20):
+    """Получить полную историю (сначала из сессии, потом из БД)"""
+    session_hist = get_session_history(user_id)
+    if len(session_hist) >= limit:
+        return session_hist[-limit:]
+    
+    # Если в сессии мало, добираем из БД
+    db_hist = get_history_from_db(user_id, limit - len(session_hist))
+    full_hist = db_hist + session_hist
+    return full_hist[-limit:] if len(full_hist) > limit else full_hist
 
 # ============================================================
 # ВРЕМЯ
@@ -136,19 +157,9 @@ def get_current_date():
     return get_moscow_time().strftime('%d.%m.%Y')
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ (SQLite + Supabase резерв)
+# ФУНКЦИИ БАЗЫ ДАННЫХ
 # ============================================================
 def get_db_user(user_id):
-    # Сначала пробуем Supabase
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0]
-        except:
-            pass
-    
-    # Если не работает - SQLite
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -163,38 +174,6 @@ def get_db_user(user_id):
         return None
 
 def ensure_user(user_id, username):
-    # Сначала пробуем Supabase
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
-            if not response.data:
-                joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
-                is_owner = 1 if user_id == OWNER_ID else 0
-                data = {
-                    'user_id': user_id,
-                    'username': username,
-                    'messages_today': 0,
-                    'last_reset': get_moscow_time().strftime('%Y-%m-%d'),
-                    'is_admin': is_owner,
-                    'test_used': 0,
-                    'joined_at': joined_at,
-                    'is_owner': is_owner,
-                    'premium': 0,
-                    'premium_expires': None
-                }
-                supabase.table('users_web').insert(data).execute()
-                try:
-                    supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 0}).execute()
-                except:
-                    pass
-                return True
-            else:
-                supabase.table('users_web').update({'username': username}).eq('user_id', user_id).execute()
-                return False
-        except:
-            pass
-    
-    # Если не работает - SQLite
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -234,23 +213,14 @@ def set_premium(user_id, duration_str):
     else:
         return False
 
-    # Пробуем Supabase
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
-            current_expires = response.data[0].get('premium_expires') if response.data else None
-        except:
-            current_expires = None
-    else:
-        try:
-            conn = sqlite3.connect('users_web.db')
-            c = conn.cursor()
-            c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
-            result = c.fetchone()
-            conn.close()
-            current_expires = result[0] if result else None
-        except:
-            current_expires = None
+    try:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        current_expires = result[0] if result else None
+    except:
+        current_expires = None
 
     if current_expires:
         try:
@@ -265,14 +235,6 @@ def set_premium(user_id, duration_str):
     else:
         expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Сохраняем в Supabase или SQLite
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'premium': 1, 'premium_expires': expires}).eq('user_id', user_id).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -284,13 +246,6 @@ def set_premium(user_id, duration_str):
         return False
 
 def remove_premium(user_id):
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -304,26 +259,6 @@ def remove_premium(user_id):
 def get_premium_status(user_id):
     if user_id == OWNER_ID:
         return True
-    
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium, premium_expires').eq('user_id', user_id).execute()
-            if response.data:
-                premium = response.data[0].get('premium', 0)
-                expires = response.data[0].get('premium_expires')
-                if premium == 1 and expires:
-                    try:
-                        expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-                        expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
-                        if get_moscow_time() > expires_date:
-                            supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
-                            return False
-                    except:
-                        return premium == 1
-                return premium == 1
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -347,14 +282,6 @@ def get_premium_status(user_id):
         return False
 
 def get_premium_expires(user_id):
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0].get('premium_expires')
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -368,15 +295,6 @@ def get_premium_expires(user_id):
 def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
-    
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('is_admin').eq('user_id', user_id).execute()
-            if response.data:
-                return response.data[0].get('is_admin', 0) == 1
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -388,13 +306,6 @@ def is_admin(user_id):
         return False
 
 def is_banned(user_id):
-    if use_supabase:
-        try:
-            response = supabase.table('banned_web').select('*').eq('user_id', user_id).execute()
-            return bool(response.data)
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -406,13 +317,6 @@ def is_banned(user_id):
         return False
 
 def ban_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('banned_web').insert({'user_id': user_id}).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -424,13 +328,6 @@ def ban_user(user_id):
         return False
 
 def unban_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('banned_web').delete().eq('user_id', user_id).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -442,13 +339,6 @@ def unban_user(user_id):
         return False
 
 def mute_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('muted_web').insert({'user_id': user_id}).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -460,13 +350,6 @@ def mute_user(user_id):
         return False
 
 def unmute_user(user_id):
-    if use_supabase:
-        try:
-            supabase.table('muted_web').delete().eq('user_id', user_id).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -478,13 +361,6 @@ def unmute_user(user_id):
         return False
 
 def set_admin(user_id, is_admin_flag):
-    if use_supabase:
-        try:
-            supabase.table('users_web').update({'is_admin': 1 if is_admin_flag else 0}).eq('user_id', user_id).execute()
-            return True
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -501,19 +377,6 @@ def can_send_message(user_id):
     if is_banned(user_id):
         return False
     reset_messages_if_needed(user_id)
-    
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('messages_today, premium').eq('user_id', user_id).execute()
-            if response.data:
-                messages = response.data[0].get('messages_today', 0)
-                premium = response.data[0].get('premium', 0)
-                if premium == 1:
-                    return True
-                return messages < FREE_LIMIT
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -532,25 +395,6 @@ def can_send_message(user_id):
 def increment_messages(user_id):
     if user_id == OWNER_ID or is_admin(user_id):
         return
-    
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('messages_today').eq('user_id', user_id).execute()
-            if response.data:
-                current = response.data[0].get('messages_today', 0)
-                supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
-                try:
-                    stat_resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
-                    if stat_resp.data:
-                        total = stat_resp.data[0].get('total_messages', 0)
-                        supabase.table('total_stats_web').update({'total_messages': total + 1}).eq('user_id', user_id).execute()
-                    else:
-                        supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 1}).execute()
-                except:
-                    pass
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -563,17 +407,6 @@ def increment_messages(user_id):
 
 def reset_messages_if_needed(user_id):
     today = get_moscow_time().strftime('%Y-%m-%d')
-    
-    if use_supabase:
-        try:
-            response = supabase.table('users_web').select('last_reset').eq('user_id', user_id).execute()
-            if response.data:
-                last_reset = response.data[0].get('last_reset')
-                if last_reset != today:
-                    supabase.table('users_web').update({'messages_today': 0, 'last_reset': today}).eq('user_id', user_id).execute()
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -588,19 +421,11 @@ def reset_messages_if_needed(user_id):
     except:
         pass
 
+# ============================================================
+# ФУНКЦИИ ДЛЯ ИСТОРИИ И ПАМЯТИ
+# ============================================================
 def save_message(user_id, role, content):
-    if use_supabase:
-        try:
-            supabase.table('chat_history_web').insert({
-                'user_id': user_id,
-                'role': role,
-                'content': content,
-                'timestamp': get_moscow_time().isoformat()
-            }).execute()
-            return
-        except:
-            pass
-    
+    """Сохранить сообщение в БД (долгосрочная память)"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -611,20 +436,8 @@ def save_message(user_id, role, content):
     except:
         pass
 
-def get_history(user_id, limit=10):
-    if use_supabase:
-        try:
-            response = supabase.table('chat_history_web') \
-                .select('role, content') \
-                .eq('user_id', user_id) \
-                .order('id', desc=True) \
-                .limit(limit) \
-                .execute()
-            if response.data:
-                return list(reversed(response.data))
-        except:
-            pass
-    
+def get_history_from_db(user_id, limit=10):
+    """Получить историю из БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -637,13 +450,7 @@ def get_history(user_id, limit=10):
         return []
 
 def clear_history(user_id):
-    if use_supabase:
-        try:
-            supabase.table('chat_history_web').delete().eq('user_id', user_id).execute()
-            return
-        except:
-            pass
-    
+    """Очистить историю в БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -654,18 +461,6 @@ def clear_history(user_id):
         pass
 
 def remember(user_id, topic, fact):
-    if use_supabase:
-        try:
-            supabase.table('user_memory_web').insert({
-                'user_id': user_id,
-                'topic': topic.lower(),
-                'fact': fact,
-                'timestamp': get_moscow_time().isoformat()
-            }).execute()
-            return
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -677,20 +472,6 @@ def remember(user_id, topic, fact):
         pass
 
 def recall(user_id, topic):
-    if use_supabase:
-        try:
-            response = supabase.table('user_memory_web') \
-                .select('fact') \
-                .eq('user_id', user_id) \
-                .ilike('topic', f'%{topic.lower()}%') \
-                .order('id', desc=True) \
-                .limit(3) \
-                .execute()
-            if response.data:
-                return [f"🧠 {r['fact']}" for r in response.data]
-        except:
-            pass
-    
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -796,12 +577,17 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ! 🚀"""
 
 def process_message_with_history(user_id, user_text):
-    save_message(user_id, 'user', user_text)
-    history = get_history(user_id, limit=10)
-
+    # Добавляем сообщение пользователя в историю
+    add_to_session_history(user_id, 'user', user_text)
+    
+    # Получаем историю диалога (сессия + БД)
+    history = get_full_history(user_id, limit=20)
+    
+    current_date = get_current_date()
+    current_time = get_moscow_time().strftime('%H:%M')
     system_prompt = SUPER_SYSTEM_PROMPT.format(
-        current_date=get_current_date(),
-        current_time=get_moscow_time().strftime('%H:%M')
+        current_date=current_date,
+        current_time=current_time
     )
 
     if get_premium_status(user_id):
@@ -813,8 +599,9 @@ def process_message_with_history(user_id, user_text):
 
     if history:
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
-        system_prompt += f"\n\n📜 История:\n{history_text}"
+        system_prompt += f"\n\n📜 История диалога (помню всё, что ты говорил):\n{history_text}"
 
+    # Сохраняем факты в память
     if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
             remember(user_id, "интересы", user_text[:100])
@@ -838,7 +625,7 @@ def process_message_with_history(user_id, user_text):
         response = "🤖 Задай вопрос, я найду ответ!"
 
     if response:
-        save_message(user_id, 'assistant', response)
+        add_to_session_history(user_id, 'assistant', response)
 
     return response
 
@@ -919,7 +706,7 @@ def generate_image(prompt):
     return None
 
 # ============================================================
-# HTML (УПРОЩЁННЫЙ)
+# HTML С КРАСИВЫМ ИНТЕРФЕЙСОМ
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -927,7 +714,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AWESOME AI</title>
+    <title>AWESOME AI 2026</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -937,77 +724,116 @@ HTML_TEMPLATE = """
             height: 100vh;
             display: flex;
             flex-direction: column;
+            overflow: hidden;
         }
         .header {
             background: rgba(10,14,23,0.95);
+            backdrop-filter: blur(20px);
             padding: 12px 20px;
             border-bottom: 1px solid rgba(255,255,255,0.05);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-shrink: 0;
+            z-index: 10;
         }
-        .logo { font-size: 20px; font-weight: 900; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .logo {
+            font-size: 22px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-size: 300% 300%;
+            animation: gradient 4s ease-in-out infinite;
+        }
+        @keyframes gradient {
+            0%,100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
         .menu button {
             background: rgba(255,255,255,0.05);
-            border: none;
+            border: 1px solid rgba(255,255,255,0.06);
             color: #8b949e;
             padding: 4px 12px;
-            border-radius: 12px;
+            border-radius: 14px;
             font-size: 10px;
             cursor: pointer;
+            transition: all 0.2s ease;
             margin: 2px;
         }
-        .menu button:hover { background: rgba(88,166,255,0.1); color: #58a6ff; }
+        .menu button:hover {
+            background: rgba(88,166,255,0.1);
+            color: #58a6ff;
+            border-color: rgba(88,166,255,0.2);
+            transform: translateY(-1px);
+        }
+        .menu .clear-btn:hover {
+            background: rgba(248,81,73,0.1);
+            color: #f85149;
+            border-color: rgba(248,81,73,0.2);
+        }
         .chat {
             flex: 1;
             overflow-y: auto;
             padding: 16px 20px;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 10px;
         }
+        .chat::-webkit-scrollbar { width: 3px; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
         .message {
             max-width: 80%;
-            padding: 8px 14px;
-            border-radius: 14px;
-            font-size: 13px;
+            padding: 10px 16px;
+            border-radius: 16px;
+            font-size: 14px;
             line-height: 1.6;
             white-space: pre-wrap;
             word-wrap: break-word;
+            animation: slideIn 0.3s ease-out;
         }
-        .user { align-self: flex-end; background: linear-gradient(135deg, #1f6feb, #6c3ce0); color: #fff; border-bottom-right-radius: 2px; }
-        .bot { align-self: flex-start; background: rgba(22,27,34,0.9); border: 1px solid rgba(255,255,255,0.05); border-bottom-left-radius: 2px; }
+        @keyframes slideIn {
+            0% { opacity: 0; transform: translateY(10px) scale(0.98); }
+            100% { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .bot {
+            align-self: flex-start;
+            background: rgba(22,27,34,0.9);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-bottom-left-radius: 4px;
+            color: #e6edf3;
+        }
+        .bot strong { color: #f0883e; }
+        .bot code {
+            background: rgba(255,255,255,0.05);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .message img {
+            max-width: 100%;
+            border-radius: 8px;
+            margin: 4px 0;
+        }
         .input-area {
             padding: 8px 16px 12px;
             border-top: 1px solid rgba(255,255,255,0.05);
             background: rgba(10,14,23,0.95);
+            backdrop-filter: blur(20px);
+            flex-shrink: 0;
         }
-        .input-row { display: flex; gap: 8px; align-items: center; }
-        .input-row input {
-            flex: 1;
-            padding: 8px 16px;
-            border-radius: 20px;
-            border: 1px solid rgba(255,255,255,0.06);
-            background: rgba(22,27,34,0.6);
-            color: #e6edf3;
-            font-size: 13px;
-            outline: none;
+        .tools {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-bottom: 6px;
         }
-        .input-row input:focus { border-color: #58a6ff; }
-        .input-row button {
-            padding: 8px 20px;
-            border-radius: 20px;
-            border: none;
-            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
-            color: #fff;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        .input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
-        .typing { color: #8b949e; font-size: 12px; padding: 4px 16px; align-self: flex-start; }
-        .welcome { text-align: center; padding: 40px 20px; color: #8b949e; }
-        .welcome h2 { color: #e6edf3; font-size: 24px; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .tools { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
         .tools button {
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.04);
@@ -1016,56 +842,209 @@ HTML_TEMPLATE = """
             border-radius: 14px;
             font-size: 9px;
             cursor: pointer;
+            transition: all 0.2s ease;
         }
-        .tools button:hover { background: rgba(255,255,255,0.06); color: #e6edf3; }
+        .tools button:hover {
+            background: rgba(255,255,255,0.06);
+            color: #e6edf3;
+            border-color: rgba(255,255,255,0.08);
+        }
+        .input-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .input-row input {
+            flex: 1;
+            padding: 8px 16px;
+            border-radius: 20px;
+            border: 1px solid rgba(255,255,255,0.06);
+            background: rgba(22,27,34,0.6);
+            color: #e6edf3;
+            font-size: 14px;
+            outline: none;
+            transition: border 0.3s ease;
+        }
+        .input-row input:focus {
+            border-color: #58a6ff;
+            box-shadow: 0 0 30px rgba(88,166,255,0.03);
+        }
+        .input-row input::placeholder {
+            color: #484f58;
+        }
+        .input-row button {
+            padding: 8px 20px;
+            border-radius: 20px;
+            border: none;
+            background: linear-gradient(135deg, #1f6feb, #6c3ce0);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+        .input-row button:hover {
+            transform: scale(1.02);
+        }
+        .input-row button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .typing {
+            color: #8b949e;
+            font-size: 12px;
+            padding: 4px 16px;
+            align-self: flex-start;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%,100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .welcome {
+            text-align: center;
+            padding: 40px 20px;
+            color: #8b949e;
+        }
+        .welcome h2 {
+            color: #e6edf3;
+            font-size: 28px;
+            background: linear-gradient(135deg, #58a6ff, #f0883e);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .welcome p {
+            margin-top: 8px;
+            opacity: 0.6;
+            font-size: 14px;
+        }
+        .welcome .features {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+        .welcome .features span {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            padding: 4px 14px;
+            border-radius: 16px;
+            font-size: 10px;
+            color: #6e7681;
+            transition: all 0.2s ease;
+        }
+        .welcome .features span:hover {
+            background: rgba(255,255,255,0.06);
+            color: #e6edf3;
+        }
+        .memory-indicator {
+            font-size: 10px;
+            color: #6e7681;
+            padding: 2px 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+        @media (max-width: 640px) {
+            .header { padding: 8px 12px; }
+            .logo { font-size: 17px; }
+            .menu button { font-size: 8px; padding: 3px 8px; }
+            .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
+            .chat { padding: 10px 12px; }
+            .input-area { padding: 6px 10px 10px; }
+            .input-row input { font-size: 13px; padding: 6px 12px; }
+            .input-row button { padding: 6px 14px; font-size: 13px; }
+            .welcome h2 { font-size: 22px; }
+        }
     </style>
 </head>
 <body>
     <header class="header">
         <span class="logo">🧠 AWESOME AI</span>
-        <div class="menu">
-            <button onclick="sendCommand('/status')">📊</button>
-            <button onclick="sendCommand('/premium')">💎</button>
-            <button onclick="sendCommand('/test')">🎁</button>
-            <button onclick="sendCommand('/profile')">👤</button>
-            <button onclick="sendCommand('/stats')">📈</button>
-            <button onclick="sendCommand('/help')">❓</button>
-            <button onclick="sendCommand('/clear')">🗑️</button>
-            <button onclick="sendCommand('/history')">📜</button>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <span class="memory-indicator" id="memoryCount">💾 0 сообщений</span>
+            <div class="menu">
+                <button onclick="sendCommand('/status')">📊</button>
+                <button onclick="sendCommand('/premium')">💎</button>
+                <button onclick="sendCommand('/test')">🎁</button>
+                <button onclick="sendCommand('/profile')">👤</button>
+                <button onclick="sendCommand('/stats')">📈</button>
+                <button onclick="sendCommand('/help')">❓</button>
+                <button class="clear-btn" onclick="clearChat()">🧹</button>
+                <button onclick="sendCommand('/history')">📜</button>
+            </div>
         </div>
     </header>
+    
     <div class="chat" id="chat">
         <div class="welcome">
-            <h2>✨ AWESOME AI</h2>
-            <p>Спрашивай что угодно</p>
+            <h2>✨ AWESOME AI 2026</h2>
+            <p>Я запоминаю весь диалог, пока ты здесь</p>
+            <div class="features">
+                <span>🧠 Память</span>
+                <span>🌤 Погода</span>
+                <span>💵 Курсы</span>
+                <span>🪙 Крипта</span>
+                <span>🎨 Рисование</span>
+                <span>📜 История</span>
+            </div>
         </div>
     </div>
+    
     <div class="input-area">
         <div class="tools">
-            <button onclick="sendCommand('/weather '+prompt('Город?'))">🌤</button>
+            <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
             <button onclick="sendCommand('/exchange')">💵</button>
             <button onclick="sendCommand('/crypto')">🪙</button>
+            <button onclick="sendCommand('/draw '+prompt('🎨 Описание картинки?'))">🎨</button>
+            <button onclick="sendCommand('/clear')">🗑️ Очистить диалог</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши..." autofocus>
-            <button id="sendBtn">➤</button>
+            <input id="input" placeholder="Напиши что-нибудь..." autofocus>
+            <button id="sendBtn">➤ Отправить</button>
         </div>
     </div>
+    
     <script>
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
-        let userId = localStorage.getItem('awesome_user_id');
-        if (!userId) { userId = Date.now() + Math.floor(Math.random() * 1000); localStorage.setItem('awesome_user_id', userId); }
+        const memoryCount = document.getElementById('memoryCount');
+        let messageCount = 0;
         
-        function addMessage(text, isUser) {
+        let userId = localStorage.getItem('awesome_user_id');
+        if (!userId) {
+            userId = Date.now() + Math.floor(Math.random() * 1000);
+            localStorage.setItem('awesome_user_id', userId);
+        }
+        
+        function updateMemoryCount() {
+            const msgs = chat.querySelectorAll('.message').length;
+            memoryCount.textContent = '💾 ' + msgs + ' сообщений';
+        }
+        
+        function addMessage(text, isUser, isImage = false) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
+            
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            div.innerHTML = text.replace(/\\n/g, '<br>');
+            
+            let formatted = text;
+            if (!isUser) {
+                formatted = formatted.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+                formatted = formatted.replace(/\\*(.*?)\\*/g, '<i>$1</i>');
+                formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
+                formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
+            }
+            formatted = formatted.replace(/\\n/g, '<br>');
+            
+            div.innerHTML = formatted;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
+            messageCount++;
+            updateMemoryCount();
         }
         
         function setTyping(show) {
@@ -1083,10 +1062,13 @@ HTML_TEMPLATE = """
         async function sendMessage(text) {
             const messageText = text || input.value.trim();
             if (!messageText) return;
+            
             input.value = '';
             sendBtn.disabled = true;
+            
             addMessage(messageText, true);
             setTyping(true);
+            
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
@@ -1095,15 +1077,22 @@ HTML_TEMPLATE = """
                 });
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) addMessage('⚠️ ' + data.error, false);
-                else if (data.reply) addMessage(data.reply, false);
-                else addMessage('⚠️ Пустой ответ', false);
+                if (data.error) {
+                    addMessage('⚠️ ' + data.error, false);
+                } else if (data.reply) {
+                    addMessage(data.reply, false);
+                } else {
+                    addMessage('⚠️ Пустой ответ', false);
+                }
             } catch (e) {
                 setTyping(false);
                 addMessage('⚠️ Ошибка соединения', false);
+                console.error(e);
             }
+            
             sendBtn.disabled = false;
             input.focus();
+            updateMemoryCount();
         }
         
         function sendCommand(cmd) {
@@ -1111,14 +1100,54 @@ HTML_TEMPLATE = """
             sendMessage();
         }
         
+        async function clearChat() {
+            if (!confirm('🧹 Очистить весь диалог?')) return;
+            
+            try {
+                const response = await fetch('/api/clear_history', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: parseInt(userId) })
+                });
+                const data = await response.json();
+                
+                // Очищаем чат
+                chat.innerHTML = `
+                    <div class="welcome">
+                        <h2>✨ AWESOME AI 2026</h2>
+                        <p>Диалог очищен! Начинай заново</p>
+                        <div class="features">
+                            <span>🧠 Память</span>
+                            <span>🌤 Погода</span>
+                            <span>💵 Курсы</span>
+                            <span>🪙 Крипта</span>
+                            <span>🎨 Рисование</span>
+                            <span>📜 История</span>
+                        </div>
+                    </div>
+                `;
+                messageCount = 0;
+                updateMemoryCount();
+                addMessage('🧹 Диалог очищен! Теперь я ничего не помню из прошлого.', false);
+            } catch (e) {
+                addMessage('⚠️ Ошибка очистки', false);
+            }
+        }
+        
+        // Enter для отправки
         document.addEventListener('DOMContentLoaded', function() {
             input.focus();
             input.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    sendMessage();
+                }
             });
             sendBtn.addEventListener('click', function(e) {
-                e.preventDefault(); sendMessage();
+                e.preventDefault();
+                sendMessage();
             });
+            updateMemoryCount();
         });
     </script>
 </body>
@@ -1132,6 +1161,19 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+@app.route('/api/clear_history', methods=['POST', 'OPTIONS'])
+def clear_history_api():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        data = request.json
+        user_id = data.get('user_id', 1)
+        clear_session_history(user_id)
+        clear_history(user_id)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
+
 @app.route('/api/chat', methods=['POST', 'OPTIONS'])
 def chat():
     if request.method == 'OPTIONS':
@@ -1142,7 +1184,7 @@ def chat():
         message = data.get('message', '')
         user_id = data.get('user_id', 1)
         
-        print(f"📩 Получено от {user_id}: {message[:30]}...", flush=True)
+        print(f"📩 [{user_id}]: {message[:50]}...", flush=True)
         
         if not message:
             return jsonify({'error': 'Напиши что-нибудь!'})
@@ -1150,26 +1192,25 @@ def chat():
         ensure_user(user_id, f"user_{user_id}")
 
         if not can_send_message(user_id):
-            user_data = get_db_user(user_id)
-            messages = user_data.get('messages_today', 0) if user_data else 0
-            remaining = FREE_LIMIT - messages
-            return jsonify({'reply': f"🔴 Лимит: {remaining}/{FREE_LIMIT}\n💎 Купи Premium: /premium"})
+            return jsonify({'reply': "🔴 Лимит исчерпан!\n💎 Купи Premium: /premium"})
 
+        # Команды
         if message.startswith('/'):
             cmd = message.lower().strip()
             
             if cmd == '/clear':
+                clear_session_history(user_id)
                 clear_history(user_id)
-                return jsonify({'reply': "🧹 История очищена!"})
+                return jsonify({'reply': "🧹 Диалог полностью очищен!"})
                 
             elif cmd == '/history':
-                history = get_history(user_id, limit=10)
+                history = get_full_history(user_id, limit=20)
                 if not history:
                     return jsonify({'reply': "📜 История пуста."})
-                text = "📜 Последние сообщения:\n"
+                text = "📜 *ВЕСЬ ДИАЛОГ:*\n\n"
                 for h in history:
                     role = "👤 Вы" if h['role'] == 'user' else "🤖 AWESOME AI"
-                    text += f"\n{role}: {h['content'][:100]}"
+                    text += f"**{role}:** {h['content']}\n\n"
                 return jsonify({'reply': text})
                 
             elif cmd == '/status':
@@ -1183,8 +1224,8 @@ def chat():
                     expires = get_premium_expires(user_id)
                     if expires:
                         status_text += f" (до {format_date(expires)})"
-                remaining = FREE_LIMIT - messages if not premium else "♾️"
-                return jsonify({'reply': f"📊 СТАТУС\n\n👤 {status_text}\n📨 {remaining}/{FREE_LIMIT if not premium else '♾️'}"})
+                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память: {len(get_session_history(user_id))} сообщений"
+                return jsonify({'reply': reply})
                 
             elif cmd == '/premium':
                 has_premium = get_premium_status(user_id)
@@ -1199,11 +1240,14 @@ def chat():
                 
             elif cmd == '/test':
                 try:
-                    response = supabase.table('users_web').select('test_used, premium').eq('user_id', user_id).execute()
-                    if response.data:
-                        test_used = response.data[0].get('test_used', 0)
-                    else:
+                    conn = sqlite3.connect('users_web.db')
+                    c = conn.cursor()
+                    c.execute('SELECT test_used, premium FROM users_web WHERE user_id = ?', (user_id,))
+                    result = c.fetchone()
+                    conn.close()
+                    if not result:
                         return jsonify({'reply': '❌ Пользователь не найден'})
+                    test_used, premium = result
                 except:
                     return jsonify({'reply': '❌ Ошибка БД'})
 
@@ -1214,7 +1258,11 @@ def chat():
                     
                 if set_premium(user_id, "2d"):
                     try:
-                        supabase.table('users_web').update({'test_used': 1}).eq('user_id', user_id).execute()
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('UPDATE users_web SET test_used = 1 WHERE user_id = ?', (user_id,))
+                        conn.commit()
+                        conn.close()
                     except:
                         pass
                     return jsonify({'reply': "🎉 ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!\n\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Приоритетная обработка\n\n⏳ Доступ активен 48 часов."})
@@ -1228,6 +1276,7 @@ def chat():
                 messages = user_data.get('messages_today', 0)
                 premium = get_premium_status(user_id)
                 joined_at = user_data.get('joined_at', 'Неизвестно')
+                history_count = len(get_session_history(user_id))
                 
                 if user_id == OWNER_ID:
                     status = "👑 ВЛАДЕЛЕЦ"
@@ -1244,16 +1293,19 @@ def chat():
                     status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
                     limit_text = f"{FREE_LIMIT}/день"
                     
-                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n📅 Вход: {joined_at}"})
+                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память: {history_count} сообщений\n📅 Вход: {joined_at}"})
                 
             elif cmd == '/stats':
                 if user_id == OWNER_ID or is_admin(user_id):
                     try:
-                        response = supabase.table('users_web').select('*').execute()
-                        users = response.data
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('SELECT * FROM users_web')
+                        users = c.fetchall()
+                        conn.close()
                         total = len(users)
-                        premium = sum(1 for u in users if u.get('premium', 0) == 1)
-                        admins = sum(1 for u in users if u.get('is_admin', 0) == 1)
+                        premium = sum(1 for u in users if u[2] == 1)
+                        admins = sum(1 for u in users if u[6] == 1)
                         return jsonify({'reply': f"📊 СТАТИСТИКА\n\n👥 Всего: {total}\n👑 Админов: {admins}\n💎 Premium: {premium}\n🔓 Бесплатных: {total - premium - admins}"})
                     except:
                         return jsonify({'reply': '❌ Ошибка получения статистики'})
@@ -1264,8 +1316,12 @@ def chat():
                     messages = user_data.get('messages_today', 0)
                     premium = get_premium_status(user_id)
                     try:
-                        resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
-                        total = resp.data[0].get('total_messages', 0) if resp.data else 0
+                        conn = sqlite3.connect('users_web.db')
+                        c = conn.cursor()
+                        c.execute('SELECT total_messages FROM total_stats_web WHERE user_id = ?', (user_id,))
+                        result = c.fetchone()
+                        conn.close()
+                        total = result[0] if result else 0
                     except:
                         total = 0
                     return jsonify({'reply': f"📊 ТВОЯ СТАТИСТИКА\n\n💎 Статус: {'PREMIUM' if premium else 'Бесплатный'}\n📨 Сегодня: {messages}\n📊 Всего: {total}"})
@@ -1274,9 +1330,10 @@ def chat():
                 return jsonify({'reply': """🧠 AWESOME AI — ПОМОЩЬ
 
 🌐 Что я умею:
+• 🧠 Запоминаю ВЕСЬ диалог!
 • 🌤 Погода с прогнозом
 • 💵 Курс валют и криптовалют
-• 🧠 Запоминаю факты о вас
+• 🎨 Генерирую картинки
 
 📋 Команды:
 /status — Статус
@@ -1285,15 +1342,18 @@ def chat():
 /profile — Профиль
 /stats — Статистика
 /help — Помощь
-/clear — Очистить историю
-/history — Показать историю
+/clear — Очистить диалог
+/history — Показать весь диалог
 /weather [город] — Погода
 /exchange — Курс валют
 /crypto — Криптовалюты
+/draw [описание] — Сгенерировать картинку
 
 💎 Лимиты:
 🔓 Бесплатно — 20 сообщений/день
-💎 Premium — ♾️ БЕЗЛИМИТНО"""})
+💎 Premium — ♾️ БЕЗЛИМИТНО
+
+🧠 Я запоминаю всё, что ты говоришь, пока ты на сайте!"""})
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
@@ -1325,6 +1385,7 @@ def chat():
                 else:
                     return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
 
+        # Обычное сообщение
         response = process_message_with_history(user_id, message)
         if response:
             increment_messages(user_id)
@@ -1334,6 +1395,8 @@ def chat():
 
     except Exception as e:
         print(f"❌ Ошибка: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)})
 
 @app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
@@ -1404,20 +1467,23 @@ def admin_panel():
         unmute_user(target_id)
 
     try:
-        response = supabase.table('users_web').select('*').order('user_id', desc=True).execute()
-        users = response.data
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at, premium_expires FROM users_web ORDER BY user_id DESC')
+        users = c.fetchall()
+        conn.close()
     except:
         users = []
 
     rows = ""
     for u in users:
-        uid = u['user_id']
-        username = u.get('username', 'unknown')
-        premium = u.get('premium', 0)
-        msgs = u.get('messages_today', 0)
-        is_admin_flag = u.get('is_admin', 0)
-        joined = u.get('joined_at', '—')
-        expires = u.get('premium_expires')
+        uid = u[0]
+        username = u[1]
+        premium = u[2]
+        msgs = u[3]
+        is_admin_flag = u[4]
+        joined = u[6] if len(u) > 6 else '—'
+        expires = u[7] if len(u) > 7 else None
         status = "👑 ВЛАДЕЛЕЦ" if uid == OWNER_ID else "👑 АДМИН" if is_admin_flag else "💎 PREMIUM" if premium else "🔓 Бесплатный"
         expires_str = format_date(expires) if expires else "нет"
         rows += f'''
@@ -1470,8 +1536,8 @@ def admin_panel():
         <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
         <div class="stats">
             <div class="card"><span>👥 Всего</span><div class="num">{len(users)}</div></div>
-            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u.get('premium', 0) == 1)}</div></div>
-            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u.get('is_admin', 0) == 1)}</div></div>
+            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u[2] == 1)}</div></div>
+            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u[4] == 1)}</div></div>
         </div>
         <table>
             <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th><th>Premium до</th><th>Действия</th></tr></thead>
@@ -1487,11 +1553,19 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 50, flush=True)
-    print("🧠 AWESOME AI 2026", flush=True)
+    print("🧠 AWESOME AI 2026 - С ПАМЯТЬЮ!", flush=True)
     print("=" * 50, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 50, flush=True)
-    print(f"✅ База: {'Supabase' if use_supabase else 'SQLite (локальная)'}", flush=True)
+    print("✅ SQLite база данных", flush=True)
+    print("✅ In-Memory кэш диалогов", flush=True)
+    print("✅ Бот запоминает ВЕСЬ диалог!", flush=True)
+    print("✅ /clear - очистить диалог", flush=True)
+    print("✅ /history - показать весь диалог", flush=True)
     print("=" * 50, flush=True)
+    
+    # Создаём папку для сессий
+    os.makedirs('./flask_session', exist_ok=True)
+    
     app.run(host='0.0.0.0', port=port, debug=True)
