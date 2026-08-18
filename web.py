@@ -13,10 +13,9 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
-from flask import Flask, request, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from dotenv import load_dotenv
-from flask_session import Session
 
 import requests
 import urllib3
@@ -26,13 +25,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', 'awesome_ai_secret_key_2026')
-app.config['SESSION_TYPE'] = 'filesystem'
-app.config['SESSION_PERMANENT'] = False
-app.config['SESSION_USE_SIGNER'] = True
-app.config['SESSION_FILE_DIR'] = './flask_session'
-Session(app)
-
+app.secret_key = 'awesome_ai_secret_key_2026'
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -50,10 +43,50 @@ FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
 GIGACHAT_AUTH_KEY = "MDFhMDBkNmEtMmExNC03M2JkLWFlZmMtOTQ0OWVlOTc5M2U1OmE1ZWJhM2NlLTQwYjAtNDZlYi1iMmY2LTE3OTFmYzhhYTQ2MA=="
 OWNER_ID = 1787063701739
 
-FREE_LIMIT = 999999  # Безлимит для теста
+FREE_LIMIT = 999999
 
 # ============================================================
-# SQLite БАЗА ДАННЫХ (ДЛЯ ДОЛГОСРОЧНОЙ ПАМЯТИ)
+# ХРАНИЛИЩЕ ДИАЛОГОВ В ПАМЯТИ СЕРВЕРА
+# ============================================================
+# {user_id: [{"role": "user/assistant", "content": "text"}, ...]}
+dialogs = {}
+
+def get_dialog(user_id):
+    """Получить диалог пользователя"""
+    if user_id not in dialogs:
+        dialogs[user_id] = []
+    return dialogs[user_id]
+
+def add_to_dialog(user_id, role, content):
+    """Добавить сообщение в диалог"""
+    if user_id not in dialogs:
+        dialogs[user_id] = []
+    dialogs[user_id].append({"role": role, "content": content})
+    # Ограничиваем 50 сообщениями
+    if len(dialogs[user_id]) > 50:
+        dialogs[user_id] = dialogs[user_id][-50:]
+    # Сохраняем в БД
+    save_message(user_id, role, content)
+
+def clear_dialog(user_id):
+    """Очистить диалог пользователя"""
+    if user_id in dialogs:
+        dialogs[user_id] = []
+    clear_history(user_id)
+
+def get_full_dialog(user_id, limit=20):
+    """Получить полный диалог"""
+    dialog = get_dialog(user_id)
+    if len(dialog) >= limit:
+        return dialog[-limit:]
+    
+    # Если в памяти мало, добираем из БД
+    db_hist = get_history_from_db(user_id, limit - len(dialog))
+    full = db_hist + dialog
+    return full[-limit:] if len(full) > limit else full
+
+# ============================================================
+# SQLite БАЗА ДАННЫХ
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -93,47 +126,6 @@ def init_db():
     print("✅ SQLite база создана/проверена", flush=True)
 
 init_db()
-
-# ============================================================
-# IN-MEMORY КЭШ ДЛЯ ДИАЛОГОВ (ПОКА СЕССИЯ ЖИВА)
-# ============================================================
-# Храним диалоги в памяти для быстрого доступа
-# Структура: {user_id: [{"role": "user/assistant", "content": "text"}, ...]}
-session_cache = {}
-
-def get_session_history(user_id):
-    """Получить историю диалога из сессии"""
-    if user_id not in session_cache:
-        session_cache[user_id] = []
-    return session_cache[user_id]
-
-def add_to_session_history(user_id, role, content):
-    """Добавить сообщение в историю сессии"""
-    if user_id not in session_cache:
-        session_cache[user_id] = []
-    session_cache[user_id].append({"role": role, "content": content})
-    # Ограничиваем историю 50 сообщениями
-    if len(session_cache[user_id]) > 50:
-        session_cache[user_id] = session_cache[user_id][-50:]
-    # Сохраняем в БД для долгосрочной памяти
-    save_message(user_id, role, content)
-
-def clear_session_history(user_id):
-    """Очистить историю сессии"""
-    if user_id in session_cache:
-        session_cache[user_id] = []
-    clear_history(user_id)
-
-def get_full_history(user_id, limit=20):
-    """Получить полную историю (сначала из сессии, потом из БД)"""
-    session_hist = get_session_history(user_id)
-    if len(session_hist) >= limit:
-        return session_hist[-limit:]
-    
-    # Если в сессии мало, добираем из БД
-    db_hist = get_history_from_db(user_id, limit - len(session_hist))
-    full_hist = db_hist + session_hist
-    return full_hist[-limit:] if len(full_hist) > limit else full_hist
 
 # ============================================================
 # ВРЕМЯ
@@ -421,11 +413,7 @@ def reset_messages_if_needed(user_id):
     except:
         pass
 
-# ============================================================
-# ФУНКЦИИ ДЛЯ ИСТОРИИ И ПАМЯТИ
-# ============================================================
 def save_message(user_id, role, content):
-    """Сохранить сообщение в БД (долгосрочная память)"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -437,7 +425,6 @@ def save_message(user_id, role, content):
         pass
 
 def get_history_from_db(user_id, limit=10):
-    """Получить историю из БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -450,7 +437,6 @@ def get_history_from_db(user_id, limit=10):
         return []
 
 def clear_history(user_id):
-    """Очистить историю в БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -577,11 +563,11 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ! 🚀"""
 
 def process_message_with_history(user_id, user_text):
-    # Добавляем сообщение пользователя в историю
-    add_to_session_history(user_id, 'user', user_text)
+    # Добавляем сообщение пользователя
+    add_to_dialog(user_id, 'user', user_text)
     
-    # Получаем историю диалога (сессия + БД)
-    history = get_full_history(user_id, limit=20)
+    # Получаем историю диалога
+    history = get_full_dialog(user_id, limit=20)
     
     current_date = get_current_date()
     current_time = get_moscow_time().strftime('%H:%M')
@@ -599,9 +585,9 @@ def process_message_with_history(user_id, user_text):
 
     if history:
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
-        system_prompt += f"\n\n📜 История диалога (помню всё, что ты говорил):\n{history_text}"
+        system_prompt += f"\n\n📜 История диалога:\n{history_text}"
 
-    # Сохраняем факты в память
+    # Сохраняем факты
     if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
             remember(user_id, "интересы", user_text[:100])
@@ -625,7 +611,7 @@ def process_message_with_history(user_id, user_text):
         response = "🤖 Задай вопрос, я найду ответ!"
 
     if response:
-        add_to_session_history(user_id, 'assistant', response)
+        add_to_dialog(user_id, 'assistant', response)
 
     return response
 
@@ -706,7 +692,7 @@ def generate_image(prompt):
     return None
 
 # ============================================================
-# HTML С КРАСИВЫМ ИНТЕРФЕЙСОМ
+# HTML
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -735,7 +721,6 @@ HTML_TEMPLATE = """
             justify-content: space-between;
             align-items: center;
             flex-shrink: 0;
-            z-index: 10;
         }
         .logo {
             font-size: 22px;
@@ -765,7 +750,6 @@ HTML_TEMPLATE = """
             background: rgba(88,166,255,0.1);
             color: #58a6ff;
             border-color: rgba(88,166,255,0.2);
-            transform: translateY(-1px);
         }
         .menu .clear-btn:hover {
             background: rgba(248,81,73,0.1);
@@ -807,20 +791,10 @@ HTML_TEMPLATE = """
             background: rgba(22,27,34,0.9);
             border: 1px solid rgba(255,255,255,0.06);
             border-bottom-left-radius: 4px;
-            color: #e6edf3;
         }
         .bot strong { color: #f0883e; }
-        .bot code {
-            background: rgba(255,255,255,0.05);
-            padding: 1px 6px;
-            border-radius: 4px;
-            font-size: 12px;
-        }
-        .message img {
-            max-width: 100%;
-            border-radius: 8px;
-            margin: 4px 0;
-        }
+        .bot code { background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+        .message img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
         .input-area {
             padding: 8px 16px 12px;
             border-top: 1px solid rgba(255,255,255,0.05);
@@ -847,7 +821,6 @@ HTML_TEMPLATE = """
         .tools button:hover {
             background: rgba(255,255,255,0.06);
             color: #e6edf3;
-            border-color: rgba(255,255,255,0.08);
         }
         .input-row {
             display: flex;
@@ -863,15 +836,9 @@ HTML_TEMPLATE = """
             color: #e6edf3;
             font-size: 14px;
             outline: none;
-            transition: border 0.3s ease;
         }
-        .input-row input:focus {
-            border-color: #58a6ff;
-            box-shadow: 0 0 30px rgba(88,166,255,0.03);
-        }
-        .input-row input::placeholder {
-            color: #484f58;
-        }
+        .input-row input:focus { border-color: #58a6ff; }
+        .input-row input::placeholder { color: #484f58; }
         .input-row button {
             padding: 8px 20px;
             border-radius: 20px;
@@ -882,70 +849,16 @@ HTML_TEMPLATE = """
             cursor: pointer;
             transition: transform 0.2s ease;
         }
-        .input-row button:hover {
-            transform: scale(1.02);
-        }
-        .input-row button:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .typing {
-            color: #8b949e;
-            font-size: 12px;
-            padding: 4px 16px;
-            align-self: flex-start;
-            animation: pulse 1.5s infinite;
-        }
-        @keyframes pulse {
-            0%,100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-        .welcome {
-            text-align: center;
-            padding: 40px 20px;
-            color: #8b949e;
-        }
-        .welcome h2 {
-            color: #e6edf3;
-            font-size: 28px;
-            background: linear-gradient(135deg, #58a6ff, #f0883e);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .welcome p {
-            margin-top: 8px;
-            opacity: 0.6;
-            font-size: 14px;
-        }
-        .welcome .features {
-            display: flex;
-            gap: 8px;
-            justify-content: center;
-            margin-top: 16px;
-            flex-wrap: wrap;
-        }
-        .welcome .features span {
-            background: rgba(255,255,255,0.03);
-            border: 1px solid rgba(255,255,255,0.04);
-            padding: 4px 14px;
-            border-radius: 16px;
-            font-size: 10px;
-            color: #6e7681;
-            transition: all 0.2s ease;
-        }
-        .welcome .features span:hover {
-            background: rgba(255,255,255,0.06);
-            color: #e6edf3;
-        }
-        .memory-indicator {
-            font-size: 10px;
-            color: #6e7681;
-            padding: 2px 12px;
-            background: rgba(255,255,255,0.03);
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,0.04);
-        }
+        .input-row button:hover { transform: scale(1.02); }
+        .input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .typing { color: #8b949e; font-size: 12px; padding: 4px 16px; align-self: flex-start; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .welcome { text-align: center; padding: 40px 20px; color: #8b949e; }
+        .welcome h2 { color: #e6edf3; font-size: 28px; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .welcome p { margin-top: 8px; opacity: 0.6; font-size: 14px; }
+        .welcome .features { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+        .welcome .features span { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.04); padding: 4px 14px; border-radius: 16px; font-size: 10px; color: #6e7681; }
+        .memory-indicator { font-size: 10px; color: #6e7681; padding: 2px 12px; background: rgba(255,255,255,0.03); border-radius: 12px; border: 1px solid rgba(255,255,255,0.04); }
         @media (max-width: 640px) {
             .header { padding: 8px 12px; }
             .logo { font-size: 17px; }
@@ -982,12 +895,8 @@ HTML_TEMPLATE = """
             <h2>✨ AWESOME AI 2026</h2>
             <p>Я запоминаю весь диалог, пока ты здесь</p>
             <div class="features">
-                <span>🧠 Память</span>
-                <span>🌤 Погода</span>
-                <span>💵 Курсы</span>
-                <span>🪙 Крипта</span>
-                <span>🎨 Рисование</span>
-                <span>📜 История</span>
+                <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
+                <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
             </div>
         </div>
     </div>
@@ -998,7 +907,7 @@ HTML_TEMPLATE = """
             <button onclick="sendCommand('/exchange')">💵</button>
             <button onclick="sendCommand('/crypto')">🪙</button>
             <button onclick="sendCommand('/draw '+prompt('🎨 Описание картинки?'))">🎨</button>
-            <button onclick="sendCommand('/clear')">🗑️ Очистить диалог</button>
+            <button onclick="sendCommand('/clear')">🗑️ Очистить</button>
         </div>
         <div class="input-row">
             <input id="input" placeholder="Напиши что-нибудь..." autofocus>
@@ -1011,7 +920,6 @@ HTML_TEMPLATE = """
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         const memoryCount = document.getElementById('memoryCount');
-        let messageCount = 0;
         
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
@@ -1024,13 +932,11 @@ HTML_TEMPLATE = """
             memoryCount.textContent = '💾 ' + msgs + ' сообщений';
         }
         
-        function addMessage(text, isUser, isImage = false) {
+        function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
-            
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
-            
             let formatted = text;
             if (!isUser) {
                 formatted = formatted.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
@@ -1039,11 +945,9 @@ HTML_TEMPLATE = """
                 formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
             }
             formatted = formatted.replace(/\\n/g, '<br>');
-            
             div.innerHTML = formatted;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
-            messageCount++;
             updateMemoryCount();
         }
         
@@ -1062,13 +966,10 @@ HTML_TEMPLATE = """
         async function sendMessage(text) {
             const messageText = text || input.value.trim();
             if (!messageText) return;
-            
             input.value = '';
             sendBtn.disabled = true;
-            
             addMessage(messageText, true);
             setTyping(true);
-            
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
@@ -1077,22 +978,15 @@ HTML_TEMPLATE = """
                 });
                 const data = await response.json();
                 setTyping(false);
-                if (data.error) {
-                    addMessage('⚠️ ' + data.error, false);
-                } else if (data.reply) {
-                    addMessage(data.reply, false);
-                } else {
-                    addMessage('⚠️ Пустой ответ', false);
-                }
+                if (data.error) addMessage('⚠️ ' + data.error, false);
+                else if (data.reply) addMessage(data.reply, false);
+                else addMessage('⚠️ Пустой ответ', false);
             } catch (e) {
                 setTyping(false);
                 addMessage('⚠️ Ошибка соединения', false);
-                console.error(e);
             }
-            
             sendBtn.disabled = false;
             input.focus();
-            updateMemoryCount();
         }
         
         function sendCommand(cmd) {
@@ -1102,50 +996,36 @@ HTML_TEMPLATE = """
         
         async function clearChat() {
             if (!confirm('🧹 Очистить весь диалог?')) return;
-            
             try {
                 const response = await fetch('/api/clear_history', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: parseInt(userId) })
                 });
-                const data = await response.json();
-                
-                // Очищаем чат
                 chat.innerHTML = `
                     <div class="welcome">
                         <h2>✨ AWESOME AI 2026</h2>
                         <p>Диалог очищен! Начинай заново</p>
                         <div class="features">
-                            <span>🧠 Память</span>
-                            <span>🌤 Погода</span>
-                            <span>💵 Курсы</span>
-                            <span>🪙 Крипта</span>
-                            <span>🎨 Рисование</span>
-                            <span>📜 История</span>
+                            <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
+                            <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
                         </div>
                     </div>
                 `;
-                messageCount = 0;
                 updateMemoryCount();
-                addMessage('🧹 Диалог очищен! Теперь я ничего не помню из прошлого.', false);
+                addMessage('🧹 Диалог очищен!', false);
             } catch (e) {
                 addMessage('⚠️ Ошибка очистки', false);
             }
         }
         
-        // Enter для отправки
         document.addEventListener('DOMContentLoaded', function() {
             input.focus();
             input.addEventListener('keydown', function(e) {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    sendMessage();
-                }
+                if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
             sendBtn.addEventListener('click', function(e) {
-                e.preventDefault();
-                sendMessage();
+                e.preventDefault(); sendMessage();
             });
             updateMemoryCount();
         });
@@ -1168,8 +1048,7 @@ def clear_history_api():
     try:
         data = request.json
         user_id = data.get('user_id', 1)
-        clear_session_history(user_id)
-        clear_history(user_id)
+        clear_dialog(user_id)
         return jsonify({'status': 'ok'})
     except:
         return jsonify({'status': 'error'})
@@ -1199,12 +1078,11 @@ def chat():
             cmd = message.lower().strip()
             
             if cmd == '/clear':
-                clear_session_history(user_id)
-                clear_history(user_id)
+                clear_dialog(user_id)
                 return jsonify({'reply': "🧹 Диалог полностью очищен!"})
                 
             elif cmd == '/history':
-                history = get_full_history(user_id, limit=20)
+                history = get_full_dialog(user_id, limit=20)
                 if not history:
                     return jsonify({'reply': "📜 История пуста."})
                 text = "📜 *ВЕСЬ ДИАЛОГ:*\n\n"
@@ -1224,7 +1102,8 @@ def chat():
                     expires = get_premium_expires(user_id)
                     if expires:
                         status_text += f" (до {format_date(expires)})"
-                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память: {len(get_session_history(user_id))} сообщений"
+                dialog_len = len(get_dialog(user_id))
+                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память: {dialog_len} сообщений"
                 return jsonify({'reply': reply})
                 
             elif cmd == '/premium':
@@ -1276,7 +1155,7 @@ def chat():
                 messages = user_data.get('messages_today', 0)
                 premium = get_premium_status(user_id)
                 joined_at = user_data.get('joined_at', 'Неизвестно')
-                history_count = len(get_session_history(user_id))
+                dialog_len = len(get_dialog(user_id))
                 
                 if user_id == OWNER_ID:
                     status = "👑 ВЛАДЕЛЕЦ"
@@ -1293,7 +1172,7 @@ def chat():
                     status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
                     limit_text = f"{FREE_LIMIT}/день"
                     
-                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память: {history_count} сообщений\n📅 Вход: {joined_at}"})
+                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память: {dialog_len} сообщений\n📅 Вход: {joined_at}"})
                 
             elif cmd == '/stats':
                 if user_id == OWNER_ID or is_admin(user_id):
@@ -1349,10 +1228,6 @@ def chat():
 /crypto — Криптовалюты
 /draw [описание] — Сгенерировать картинку
 
-💎 Лимиты:
-🔓 Бесплатно — 20 сообщений/день
-💎 Premium — ♾️ БЕЗЛИМИТНО
-
 🧠 Я запоминаю всё, что ты говоришь, пока ты на сайте!"""})
                 
             elif cmd.startswith('/weather'):
@@ -1385,7 +1260,6 @@ def chat():
                 else:
                     return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
 
-        # Обычное сообщение
         response = process_message_with_history(user_id, message)
         if response:
             increment_messages(user_id)
@@ -1395,22 +1269,18 @@ def chat():
 
     except Exception as e:
         print(f"❌ Ошибка: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
         return jsonify({'error': str(e)})
 
 @app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
 def analyze_image():
     if request.method == 'OPTIONS':
         return '', 200
-    
     try:
         data = request.json
         image_base64 = data.get('image')
         user_id = data.get('user_id', 1)
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
-        
         description = "📸 Изображение получено!"
         remember(user_id, "фото", "Пользователь отправил фото")
         increment_messages(user_id)
@@ -1422,14 +1292,12 @@ def analyze_image():
 def speech_to_text_endpoint():
     if request.method == 'OPTIONS':
         return '', 200
-    
     try:
         data = request.json
         audio_base64 = data.get('audio')
         user_id = data.get('user_id', 1)
         if not audio_base64:
             return jsonify({'error': 'Нет аудио'})
-        
         return jsonify({'text': '🎤 Голосовое сообщение получено!'})
     except Exception as e:
         return jsonify({'error': str(e)})
@@ -1564,8 +1432,4 @@ if __name__ == '__main__':
     print("✅ /clear - очистить диалог", flush=True)
     print("✅ /history - показать весь диалог", flush=True)
     print("=" * 50, flush=True)
-    
-    # Создаём папку для сессий
-    os.makedirs('./flask_session', exist_ok=True)
-    
     app.run(host='0.0.0.0', port=port, debug=True)
