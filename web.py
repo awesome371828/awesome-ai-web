@@ -38,7 +38,7 @@ def after_request(response):
 # ============================================================
 # ТВОИ КЛЮЧИ - УЖЕ ПРАВИЛЬНЫЕ!
 # ============================================================
-SUPABASE_URL = "https://lprxbm shmuucymkgaqwk.supabase.co"
+SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
