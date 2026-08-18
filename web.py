@@ -46,47 +46,38 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# ХРАНИЛИЩЕ ДИАЛОГОВ В ПАМЯТИ СЕРВЕРА
+# ХРАНИЛИЩЕ ДИАЛОГОВ
 # ============================================================
-# {user_id: [{"role": "user/assistant", "content": "text"}, ...]}
 dialogs = {}
 
 def get_dialog(user_id):
-    """Получить диалог пользователя"""
     if user_id not in dialogs:
         dialogs[user_id] = []
     return dialogs[user_id]
 
 def add_to_dialog(user_id, role, content):
-    """Добавить сообщение в диалог"""
     if user_id not in dialogs:
         dialogs[user_id] = []
     dialogs[user_id].append({"role": role, "content": content})
-    # Ограничиваем 50 сообщениями
     if len(dialogs[user_id]) > 50:
         dialogs[user_id] = dialogs[user_id][-50:]
-    # Сохраняем в БД
     save_message(user_id, role, content)
 
 def clear_dialog(user_id):
-    """Очистить диалог пользователя"""
     if user_id in dialogs:
         dialogs[user_id] = []
     clear_history(user_id)
 
 def get_full_dialog(user_id, limit=20):
-    """Получить полный диалог"""
     dialog = get_dialog(user_id)
     if len(dialog) >= limit:
         return dialog[-limit:]
-    
-    # Если в памяти мало, добираем из БД
     db_hist = get_history_from_db(user_id, limit - len(dialog))
     full = db_hist + dialog
     return full[-limit:] if len(full) > limit else full
 
 # ============================================================
-# SQLite БАЗА ДАННЫХ
+# SQLite БАЗА
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -149,7 +140,7 @@ def get_current_date():
     return get_moscow_time().strftime('%d.%m.%Y')
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ ДАННЫХ
+# ФУНКЦИИ БАЗЫ
 # ============================================================
 def get_db_user(user_id):
     try:
@@ -563,17 +554,12 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ! 🚀"""
 
 def process_message_with_history(user_id, user_text):
-    # Добавляем сообщение пользователя
     add_to_dialog(user_id, 'user', user_text)
-    
-    # Получаем историю диалога
     history = get_full_dialog(user_id, limit=20)
     
-    current_date = get_current_date()
-    current_time = get_moscow_time().strftime('%H:%M')
     system_prompt = SUPER_SYSTEM_PROMPT.format(
-        current_date=current_date,
-        current_time=current_time
+        current_date=get_current_date(),
+        current_time=get_moscow_time().strftime('%H:%M')
     )
 
     if get_premium_status(user_id):
@@ -587,7 +573,6 @@ def process_message_with_history(user_id, user_text):
         history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 История диалога:\n{history_text}"
 
-    # Сохраняем факты
     if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
             remember(user_id, "интересы", user_text[:100])
@@ -692,116 +677,295 @@ def generate_image(prompt):
     return None
 
 # ============================================================
-# HTML
+# HTML - МЕГА-КРАСИВЫЙ!
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AWESOME AI 2026</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: #0a0e17;
             color: #e6edf3;
             height: 100vh;
             display: flex;
             flex-direction: column;
             overflow: hidden;
+            position: relative;
         }
+        
+        /* ===== АНИМИРОВАННЫЙ ФОН ===== */
+        #bgCanvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        
+        .glow {
+            position: fixed;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.1;
+            z-index: 0;
+            pointer-events: none;
+            animation: floatGlow 20s ease-in-out infinite alternate;
+        }
+        .glow-1 { width: 600px; height: 600px; top: -200px; right: -100px; background: #6c3ce0; }
+        .glow-2 { width: 500px; height: 500px; bottom: -150px; left: -100px; background: #f0883e; animation-delay: 7s; }
+        .glow-3 { width: 400px; height: 400px; top: 50%; left: 50%; background: #1f6feb; animation-delay: 14s; transform: translate(-50%, -50%); }
+        
+        @keyframes floatGlow {
+            0% { transform: translate(0, 0) scale(1); }
+            100% { transform: translate(80px, -60px) scale(1.3); }
+        }
+        
+        /* ===== HEADER ===== */
         .header {
-            background: rgba(10,14,23,0.95);
+            position: relative;
+            z-index: 1;
+            background: rgba(10, 14, 23, 0.85);
             backdrop-filter: blur(20px);
-            padding: 12px 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
+            -webkit-backdrop-filter: blur(20px);
+            padding: 10px 24px;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-shrink: 0;
+            flex-wrap: wrap;
+            gap: 6px;
         }
+        
         .logo {
-            font-size: 22px;
+            font-size: 20px;
             font-weight: 900;
-            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0);
+            background: linear-gradient(135deg, #58a6ff, #f0883e, #6c3ce0, #58a6ff);
+            background-size: 300% 300%;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            background-size: 300% 300%;
-            animation: gradient 4s ease-in-out infinite;
+            animation: gradShift 6s ease-in-out infinite;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
-        @keyframes gradient {
-            0%,100% { background-position: 0% 50%; }
+        @keyframes gradShift {
+            0%, 100% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
         }
-        .menu button {
-            background: rgba(255,255,255,0.05);
-            border: 1px solid rgba(255,255,255,0.06);
+        .logo .badge {
+            font-size: 8px;
+            background: rgba(46, 160, 67, 0.15);
+            border: 1px solid rgba(46, 160, 67, 0.2);
+            color: #2ea043;
+            padding: 2px 10px;
+            border-radius: 20px;
+            -webkit-text-fill-color: #2ea043;
+        }
+        
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        
+        .memory-badge {
+            font-size: 10px;
+            color: #6e7681;
+            padding: 3px 12px;
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .memory-badge .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #2ea043;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.3; transform: scale(0.7); }
+        }
+        
+        .menu-btn {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.05);
             color: #8b949e;
             padding: 4px 12px;
-            border-radius: 14px;
+            border-radius: 16px;
             font-size: 10px;
+            font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s ease;
-            margin: 2px;
+            transition: all 0.25s ease;
         }
-        .menu button:hover {
-            background: rgba(88,166,255,0.1);
+        .menu-btn:hover {
+            background: rgba(88,166,255,0.08);
+            border-color: rgba(88,166,255,0.15);
             color: #58a6ff;
-            border-color: rgba(88,166,255,0.2);
+            transform: translateY(-1px);
         }
-        .menu .clear-btn:hover {
-            background: rgba(248,81,73,0.1);
+        .menu-btn.premium:hover {
+            background: rgba(240,136,62,0.08);
+            border-color: rgba(240,136,62,0.15);
+            color: #f0883e;
+        }
+        .menu-btn.danger:hover {
+            background: rgba(248,81,73,0.08);
+            border-color: rgba(248,81,73,0.15);
             color: #f85149;
-            border-color: rgba(248,81,73,0.2);
         }
+        
+        /* ===== CHAT ===== */
         .chat {
+            position: relative;
+            z-index: 1;
             flex: 1;
             overflow-y: auto;
-            padding: 16px 20px;
+            padding: 20px 24px;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 12px;
         }
         .chat::-webkit-scrollbar { width: 3px; }
-        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 10px; }
+        .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; }
+        .chat::-webkit-scrollbar-track { background: transparent; }
+        
         .message {
             max-width: 80%;
-            padding: 10px 16px;
+            padding: 10px 18px;
             border-radius: 16px;
+            line-height: 1.7;
             font-size: 14px;
-            line-height: 1.6;
-            white-space: pre-wrap;
             word-wrap: break-word;
-            animation: slideIn 0.3s ease-out;
+            white-space: pre-wrap;
+            animation: msgSlide 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
         }
-        @keyframes slideIn {
-            0% { opacity: 0; transform: translateY(10px) scale(0.98); }
+        @keyframes msgSlide {
+            0% { opacity: 0; transform: translateY(12px) scale(0.98); }
             100% { opacity: 1; transform: translateY(0) scale(1); }
         }
-        .user {
+        
+        .message.user {
             align-self: flex-end;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: #fff;
             border-bottom-right-radius: 4px;
         }
-        .bot {
+        .message.bot {
             align-self: flex-start;
-            background: rgba(22,27,34,0.9);
-            border: 1px solid rgba(255,255,255,0.06);
+            background: rgba(22, 27, 34, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.04);
             border-bottom-left-radius: 4px;
         }
-        .bot strong { color: #f0883e; }
-        .bot code { background: rgba(255,255,255,0.05); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
-        .message img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
+        .message.bot strong { color: #f0883e; }
+        .message.bot code {
+            background: rgba(255,255,255,0.05);
+            padding: 1px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+        }
+        .message img {
+            max-width: 100%;
+            border-radius: 8px;
+            margin: 4px 0;
+        }
+        
+        .typing-indicator {
+            align-self: flex-start;
+            padding: 8px 18px;
+            background: rgba(22, 27, 34, 0.85);
+            border: 1px solid rgba(255,255,255,0.04);
+            border-radius: 16px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            animation: msgSlide 0.3s ease-out;
+        }
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #6e7681;
+            animation: typingBounce 1.4s infinite ease-in-out;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typingBounce {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
+            30% { transform: translateY(-8px); opacity: 1; }
+        }
+        
+        /* ===== WELCOME ===== */
+        .welcome {
+            text-align: center;
+            padding: 50px 20px 30px;
+            color: #8b949e;
+        }
+        .welcome h1 {
+            font-size: 36px;
+            font-weight: 900;
+            background: linear-gradient(135deg, #58a6ff, #f0883e);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 4px;
+        }
+        .welcome p {
+            font-size: 14px;
+            opacity: 0.5;
+        }
+        .welcome .features {
+            display: flex;
+            gap: 6px;
+            justify-content: center;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+        .welcome .features span {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            padding: 4px 14px;
+            border-radius: 20px;
+            font-size: 10px;
+            color: #6e7681;
+            transition: all 0.2s ease;
+            cursor: default;
+        }
+        .welcome .features span:hover {
+            background: rgba(255,255,255,0.06);
+            color: #e6edf3;
+        }
+        
+        /* ===== INPUT ===== */
         .input-area {
-            padding: 8px 16px 12px;
-            border-top: 1px solid rgba(255,255,255,0.05);
-            background: rgba(10,14,23,0.95);
+            position: relative;
+            z-index: 1;
+            padding: 8px 24px 16px;
+            border-top: 1px solid rgba(255,255,255,0.04);
+            background: rgba(10, 14, 23, 0.85);
             backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             flex-shrink: 0;
         }
+        
         .tools {
             display: flex;
             gap: 4px;
@@ -812,7 +976,7 @@ HTML_TEMPLATE = """
             background: rgba(255,255,255,0.03);
             border: 1px solid rgba(255,255,255,0.04);
             color: #6e7681;
-            padding: 2px 10px;
+            padding: 2px 12px;
             border-radius: 14px;
             font-size: 9px;
             cursor: pointer;
@@ -821,92 +985,129 @@ HTML_TEMPLATE = """
         .tools button:hover {
             background: rgba(255,255,255,0.06);
             color: #e6edf3;
+            border-color: rgba(255,255,255,0.08);
         }
+        
         .input-row {
             display: flex;
             gap: 8px;
             align-items: center;
+            background: rgba(22, 27, 34, 0.6);
+            border-radius: 24px;
+            padding: 4px 4px 4px 16px;
+            border: 1px solid rgba(255,255,255,0.04);
+            transition: border 0.3s ease, box-shadow 0.3s ease;
+        }
+        .input-row:focus-within {
+            border-color: rgba(88, 166, 255, 0.3);
+            box-shadow: 0 0 40px rgba(88, 166, 255, 0.03);
         }
         .input-row input {
             flex: 1;
-            padding: 8px 16px;
-            border-radius: 20px;
-            border: 1px solid rgba(255,255,255,0.06);
-            background: rgba(22,27,34,0.6);
+            padding: 6px 0;
+            border: none;
+            background: transparent;
             color: #e6edf3;
             font-size: 14px;
             outline: none;
+            font-family: inherit;
         }
-        .input-row input:focus { border-color: #58a6ff; }
-        .input-row input::placeholder { color: #484f58; }
+        .input-row input::placeholder {
+            color: #484f58;
+        }
         .input-row button {
-            padding: 8px 20px;
+            padding: 6px 20px;
             border-radius: 20px;
             border: none;
             background: linear-gradient(135deg, #1f6feb, #6c3ce0);
             color: #fff;
             font-weight: 600;
+            font-size: 13px;
             cursor: pointer;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            white-space: nowrap;
         }
-        .input-row button:hover { transform: scale(1.02); }
-        .input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
-        .typing { color: #8b949e; font-size: 12px; padding: 4px 16px; align-self: flex-start; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
-        .welcome { text-align: center; padding: 40px 20px; color: #8b949e; }
-        .welcome h2 { color: #e6edf3; font-size: 28px; background: linear-gradient(135deg, #58a6ff, #f0883e); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .welcome p { margin-top: 8px; opacity: 0.6; font-size: 14px; }
-        .welcome .features { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
-        .welcome .features span { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.04); padding: 4px 14px; border-radius: 16px; font-size: 10px; color: #6e7681; }
-        .memory-indicator { font-size: 10px; color: #6e7681; padding: 2px 12px; background: rgba(255,255,255,0.03); border-radius: 12px; border: 1px solid rgba(255,255,255,0.04); }
+        .input-row button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 4px 30px rgba(88, 166, 255, 0.15);
+        }
+        .input-row button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        /* ===== RESPONSIVE ===== */
         @media (max-width: 640px) {
             .header { padding: 8px 12px; }
-            .logo { font-size: 17px; }
-            .menu button { font-size: 8px; padding: 3px 8px; }
+            .logo { font-size: 16px; }
+            .logo .badge { font-size: 7px; padding: 1px 8px; }
+            .menu-btn { font-size: 8px; padding: 3px 8px; }
+            .chat { padding: 12px 12px; gap: 8px; }
             .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
-            .chat { padding: 10px 12px; }
-            .input-area { padding: 6px 10px 10px; }
-            .input-row input { font-size: 13px; padding: 6px 12px; }
-            .input-row button { padding: 6px 14px; font-size: 13px; }
-            .welcome h2 { font-size: 22px; }
+            .welcome h1 { font-size: 26px; }
+            .input-area { padding: 6px 12px 12px; }
+            .input-row { padding: 2px 2px 2px 12px; }
+            .input-row input { font-size: 13px; }
+            .input-row button { padding: 4px 14px; font-size: 12px; }
+            .tools button { font-size: 8px; padding: 1px 8px; }
+            .memory-badge { font-size: 8px; padding: 2px 8px; }
         }
     </style>
 </head>
 <body>
+    <!-- ===== АНИМИРОВАННЫЙ ФОН ===== -->
+    <canvas id="bgCanvas"></canvas>
+    <div class="glow glow-1"></div>
+    <div class="glow glow-2"></div>
+    <div class="glow glow-3"></div>
+    
+    <!-- ===== HEADER ===== -->
     <header class="header">
-        <span class="logo">🧠 AWESOME AI</span>
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-            <span class="memory-indicator" id="memoryCount">💾 0 сообщений</span>
-            <div class="menu">
-                <button onclick="sendCommand('/status')">📊</button>
-                <button onclick="sendCommand('/premium')">💎</button>
-                <button onclick="sendCommand('/test')">🎁</button>
-                <button onclick="sendCommand('/profile')">👤</button>
-                <button onclick="sendCommand('/stats')">📈</button>
-                <button onclick="sendCommand('/help')">❓</button>
-                <button class="clear-btn" onclick="clearChat()">🧹</button>
-                <button onclick="sendCommand('/history')">📜</button>
-            </div>
+        <span class="logo">
+            🧠 AWESOME AI
+            <span class="badge">● ONLINE</span>
+        </span>
+        <div class="header-right">
+            <span class="memory-badge">
+                <span class="dot"></span>
+                <span id="msgCount">0 сообщений</span>
+            </span>
+            <button class="menu-btn" onclick="sendCommand('/status')">📊</button>
+            <button class="menu-btn premium" onclick="sendCommand('/premium')">💎</button>
+            <button class="menu-btn" onclick="sendCommand('/test')">🎁</button>
+            <button class="menu-btn" onclick="sendCommand('/profile')">👤</button>
+            <button class="menu-btn" onclick="sendCommand('/stats')">📈</button>
+            <button class="menu-btn" onclick="sendCommand('/help')">❓</button>
+            <button class="menu-btn danger" onclick="clearChat()">🧹</button>
+            <button class="menu-btn" onclick="sendCommand('/history')">📜</button>
         </div>
     </header>
     
+    <!-- ===== CHAT ===== -->
     <div class="chat" id="chat">
         <div class="welcome">
-            <h2>✨ AWESOME AI 2026</h2>
-            <p>Я запоминаю весь диалог, пока ты здесь</p>
+            <h1>✨ AWESOME AI 2026</h1>
+            <p>Я запоминаю весь диалог — пока ты здесь</p>
             <div class="features">
-                <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
-                <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
+                <span>🧠 Память</span>
+                <span>🌤 Погода</span>
+                <span>💵 Курсы</span>
+                <span>🪙 Крипта</span>
+                <span>🎨 Рисование</span>
+                <span>📜 История</span>
             </div>
         </div>
     </div>
     
+    <!-- ===== INPUT ===== -->
     <div class="input-area">
         <div class="tools">
-            <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤</button>
-            <button onclick="sendCommand('/exchange')">💵</button>
-            <button onclick="sendCommand('/crypto')">🪙</button>
-            <button onclick="sendCommand('/draw '+prompt('🎨 Описание картинки?'))">🎨</button>
+            <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤 Погода</button>
+            <button onclick="sendCommand('/exchange')">💵 Курс</button>
+            <button onclick="sendCommand('/crypto')">🪙 Крипта</button>
+            <button onclick="sendCommand('/draw '+prompt('🎨 Что нарисовать?'))">🎨 Рисовать</button>
             <button onclick="sendCommand('/clear')">🗑️ Очистить</button>
         </div>
         <div class="input-row">
@@ -916,10 +1117,76 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        // ===== ФОН (ЧАСТИЦЫ) =====
+        (function() {
+            const canvas = document.getElementById('bgCanvas');
+            const ctx = canvas.getContext('2d');
+            let w, h, particles = [];
+            
+            function resize() {
+                w = canvas.width = window.innerWidth;
+                h = canvas.height = window.innerHeight;
+            }
+            window.addEventListener('resize', resize);
+            resize();
+            
+            class Particle {
+                constructor() {
+                    this.x = Math.random() * w;
+                    this.y = Math.random() * h;
+                    this.r = Math.random() * 2 + 0.5;
+                    this.sx = (Math.random() - 0.5) * 0.2;
+                    this.sy = (Math.random() - 0.5) * 0.2;
+                    this.o = Math.random() * 0.15 + 0.03;
+                }
+                update() {
+                    this.x += this.sx;
+                    this.y += this.sy;
+                    if (this.x < 0 || this.x > w) this.sx *= -1;
+                    if (this.y < 0 || this.y > h) this.sy *= -1;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(136, 192, 255, ${this.o})`;
+                    ctx.fill();
+                }
+            }
+            
+            for (let i = 0; i < 50; i++) particles.push(new Particle());
+            
+            function drawLines() {
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const d = Math.sqrt(dx*dx + dy*dy);
+                        if (d < 150) {
+                            ctx.beginPath();
+                            ctx.strokeStyle = `rgba(136, 192, 255, ${0.015 * (1 - d/150)})`;
+                            ctx.lineWidth = 0.3;
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            }
+            
+            function animate() {
+                ctx.clearRect(0, 0, w, h);
+                particles.forEach(p => { p.update(); p.draw(); });
+                drawLines();
+                requestAnimationFrame(animate);
+            }
+            animate();
+        })();
+        
+        // ===== ЛОГИКА ЧАТА =====
         const chat = document.getElementById('chat');
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
-        const memoryCount = document.getElementById('memoryCount');
+        const msgCount = document.getElementById('msgCount');
         
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
@@ -927,16 +1194,18 @@ HTML_TEMPLATE = """
             localStorage.setItem('awesome_user_id', userId);
         }
         
-        function updateMemoryCount() {
+        function updateCount() {
             const msgs = chat.querySelectorAll('.message').length;
-            memoryCount.textContent = '💾 ' + msgs + ' сообщений';
+            msgCount.textContent = msgs + ' сообщений';
         }
         
         function addMessage(text, isUser) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
+            
             const div = document.createElement('div');
             div.className = 'message ' + (isUser ? 'user' : 'bot');
+            
             let formatted = text;
             if (!isUser) {
                 formatted = formatted.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
@@ -945,46 +1214,51 @@ HTML_TEMPLATE = """
                 formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
             }
             formatted = formatted.replace(/\\n/g, '<br>');
+            
             div.innerHTML = formatted;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
-            updateMemoryCount();
+            updateCount();
         }
         
-        function setTyping(show) {
-            const existing = document.querySelector('.typing');
+        function showTyping(show) {
+            const existing = document.querySelector('.typing-indicator');
             if (existing) existing.remove();
             if (show) {
                 const div = document.createElement('div');
-                div.className = 'typing';
-                div.textContent = '🧠 AWESOME AI печатает...';
+                div.className = 'typing-indicator';
+                div.innerHTML = '<span></span><span></span><span></span>';
                 chat.appendChild(div);
                 chat.scrollTop = chat.scrollHeight;
             }
         }
         
         async function sendMessage(text) {
-            const messageText = text || input.value.trim();
-            if (!messageText) return;
+            const msg = text || input.value.trim();
+            if (!msg) return;
+            
             input.value = '';
             sendBtn.disabled = true;
-            addMessage(messageText, true);
-            setTyping(true);
+            
+            addMessage(msg, true);
+            showTyping(true);
+            
             try {
-                const response = await fetch('/api/chat', {
+                const resp = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: messageText, user_id: parseInt(userId) })
+                    body: JSON.stringify({ message: msg, user_id: parseInt(userId) })
                 });
-                const data = await response.json();
-                setTyping(false);
+                const data = await resp.json();
+                showTyping(false);
                 if (data.error) addMessage('⚠️ ' + data.error, false);
                 else if (data.reply) addMessage(data.reply, false);
                 else addMessage('⚠️ Пустой ответ', false);
             } catch (e) {
-                setTyping(false);
+                showTyping(false);
                 addMessage('⚠️ Ошибка соединения', false);
             }
+            
             sendBtn.disabled = false;
             input.focus();
         }
@@ -997,37 +1271,43 @@ HTML_TEMPLATE = """
         async function clearChat() {
             if (!confirm('🧹 Очистить весь диалог?')) return;
             try {
-                const response = await fetch('/api/clear_history', {
+                await fetch('/api/clear_history', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: parseInt(userId) })
                 });
                 chat.innerHTML = `
                     <div class="welcome">
-                        <h2>✨ AWESOME AI 2026</h2>
+                        <h1>✨ AWESOME AI 2026</h1>
                         <p>Диалог очищен! Начинай заново</p>
                         <div class="features">
-                            <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
-                            <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
+                            <span>🧠 Память</span>
+                            <span>🌤 Погода</span>
+                            <span>💵 Курсы</span>
+                            <span>🪙 Крипта</span>
+                            <span>🎨 Рисование</span>
+                            <span>📜 История</span>
                         </div>
                     </div>
                 `;
-                updateMemoryCount();
+                updateCount();
                 addMessage('🧹 Диалог очищен!', false);
             } catch (e) {
                 addMessage('⚠️ Ошибка очистки', false);
             }
         }
         
-        document.addEventListener('DOMContentLoaded', function() {
+        // ===== СОБЫТИЯ =====
+        document.addEventListener('DOMContentLoaded', () => {
             input.focus();
-            input.addEventListener('keydown', function(e) {
+            input.addEventListener('keydown', e => {
                 if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
-            sendBtn.addEventListener('click', function(e) {
-                e.preventDefault(); sendMessage();
+            sendBtn.addEventListener('click', e => {
+                e.preventDefault();
+                sendMessage();
             });
-            updateMemoryCount();
+            updateCount();
         });
     </script>
 </body>
@@ -1421,13 +1701,14 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 50, flush=True)
-    print("🧠 AWESOME AI 2026 - С ПАМЯТЬЮ!", flush=True)
+    print("🧠 AWESOME AI 2026 - МЕГА-КРАСИВЫЙ!", flush=True)
     print("=" * 50, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 50, flush=True)
-    print("✅ SQLite база данных", flush=True)
-    print("✅ In-Memory кэш диалогов", flush=True)
+    print("✅ Анимированный фон с частицами", flush=True)
+    print("✅ Стильный дизайн с градиентами", flush=True)
+    print("✅ Индикатор печати (анимация точек)", flush=True)
     print("✅ Бот запоминает ВЕСЬ диалог!", flush=True)
     print("✅ /clear - очистить диалог", flush=True)
     print("✅ /history - показать весь диалог", flush=True)
