@@ -2982,6 +2982,8 @@ keep_alive_thread.start()
 init_db()
 init_memory_db()
 
+app = bot  # ← ДОБАВЬ ЭТУ СТРОКУ!
+
 print("=" * 60)
 print("🧠 AWESOME AI 2026 — СУПЕР-БЫСТРЫЙ!")
 print("=" * 60)
