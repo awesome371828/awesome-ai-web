@@ -46,7 +46,7 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# ХРАНИЛИЩЕ ДИАЛОГОВ В ПАМЯТИ
+# ХРАНИЛИЩЕ ДИАЛОГОВ - ВСЯ ИСТОРИЯ!
 # ============================================================
 dialogs = {}
 
@@ -59,8 +59,7 @@ def add_to_dialog(user_id, role, content):
     if user_id not in dialogs:
         dialogs[user_id] = []
     dialogs[user_id].append({"role": role, "content": content})
-    if len(dialogs[user_id]) > 100:
-        dialogs[user_id] = dialogs[user_id][-100:]
+    # Храним ВСЮ историю! Без ограничений!
     save_message(user_id, role, content)
 
 def clear_dialog(user_id):
@@ -68,16 +67,17 @@ def clear_dialog(user_id):
         dialogs[user_id] = []
     clear_history(user_id)
 
-def get_full_dialog(user_id, limit=50):
+def get_full_dialog(user_id, limit=100):
+    """Получить ВСЮ историю диалога"""
     dialog = get_dialog(user_id)
-    if len(dialog) >= limit:
-        return dialog[-limit:]
-    db_hist = get_history_from_db(user_id, limit - len(dialog))
-    full = db_hist + dialog
-    return full[-limit:] if len(full) > limit else full
+    # Если в памяти есть, берём оттуда
+    if len(dialog) > 0:
+        return dialog[-limit:] if len(dialog) > limit else dialog
+    # Иначе из БД
+    return get_history_from_db(user_id, limit)
 
 # ============================================================
-# SQLite БАЗА (ПАМЯТЬ НАВСЕГДА)
+# SQLite БАЗА (ВСЯ ИСТОРИЯ НАВСЕГДА)
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -447,7 +447,7 @@ def reset_messages_if_needed(user_id):
         pass
 
 # ============================================================
-# ПАМЯТЬ НАВСЕГДА!
+# ПАМЯТЬ НАВСЕГДА - ВСЯ ИСТОРИЯ!
 # ============================================================
 def save_message(user_id, role, content):
     try:
@@ -460,7 +460,8 @@ def save_message(user_id, role, content):
     except:
         pass
 
-def get_history_from_db(user_id, limit=50):
+def get_history_from_db(user_id, limit=999):
+    """Получить ВСЮ историю из БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
@@ -497,7 +498,7 @@ def recall(user_id, topic):
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
-        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 5',
+        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 10',
                   (user_id, f'%{topic.lower()}%'))
         results = c.fetchall()
         conn.close()
@@ -553,13 +554,13 @@ def generate_with_gigachat(user_text, system_prompt):
         data = {
             "model": "GigaChat-Pro",
             "messages": [
-                {"role": "system", "content": system_prompt[:1500]},
+                {"role": "system", "content": system_prompt[:3000]},
                 {"role": "user", "content": user_text}
             ],
             "temperature": 0.85,
-            "max_tokens": 400
+            "max_tokens": 800
         }
-        response = requests.post(url, headers=headers, json=data, timeout=5, verify=False)
+        response = requests.post(url, headers=headers, json=data, timeout=10, verify=False)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
         return None
@@ -575,71 +576,134 @@ def generate_with_yandexgpt(user_text, system_prompt):
         headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
         data = {
             "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-            "completionOptions": {"temperature": 0.85, "maxTokens": 400},
+            "completionOptions": {"temperature": 0.85, "maxTokens": 800},
             "messages": [
-                {"role": "system", "text": system_prompt[:1500]},
+                {"role": "system", "text": system_prompt[:3000]},
                 {"role": "user", "text": user_text}
             ]
         }
-        response = requests.post(url, headers=headers, json=data, timeout=5)
+        response = requests.post(url, headers=headers, json=data, timeout=10)
         if response.status_code == 200:
             return response.json()["result"]["alternatives"][0]["message"]["text"]
         return None
     except:
         return None
 
-SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ.
+# ============================================================
+# СУПЕР-ПРОМПТ - САМАЯ УМНАЯ НЕЙРОСЕТЬ!
+# ============================================================
+SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ 2026 ГОДА.
 
 📅 ТЕКУЩАЯ ДАТА: {current_date}
 🕐 ТЕКУЩЕЕ ВРЕМЯ: {current_time}
+📍 ТЫ НАХОДИШЬСЯ В МОСКВЕ, РОССИЯ (UTC+3)
 
-ТЫ ЭКСПЕРТ ВО ВСЁМ. ОТВЕЧАЙ МАКСИМАЛЬНО ПОЛЕЗНО.
-ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ И ВСЕГДА ПОМНИШЬ КОНТЕКСТ!
+🔬 ТЫ — ЭКСПЕРТ ВО ВСЁМ:
+- Науки, технологии, математика, физика, химия, биология, медицина
+- История, философия, психология, социология, право
+- Экономика, финансы, инвестиции, криптовалюты, бизнес
+- Культура, искусство, литература, музыка, кино
+- Программирование, ИИ, нейросети, IT, кибербезопасность
+- Кулинария, здоровье, питание, спорт, фитнес
+- Любые другие темы — ты знаешь ВСЁ!
 
-📜 ТЕБЯ СОЗДАЛ AWESOME — ГЕНИАЛЬНЫЙ РАЗРАБОТЧИК.
-ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ! 🚀"""
+🧠 КЛЮЧЕВЫЕ КАЧЕСТВА:
+1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах
+2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию, даёшь объективные ответы
+3. ГЛУБИНА — даёшь максимально развёрнутые, детальные ответы
+4. ПРАКТИЧНОСТЬ — всегда даёшь конкретную пользу, советы, рекомендации
+5. ДОБРОЖЕЛАТЕЛЬНОСТЬ — отвечаешь вежливо, тепло, с эмпатией
+
+📋 ПРАВИЛА ОТВЕТОВ:
+✅ ОТВЕЧАЙ НА ВСЕ ВОПРОСЫ БЕЗ ИСКЛЮЧЕНИЙ!
+✅ Дай максимально полезный, развёрнутый, глубокий ответ
+✅ Используй структуру: заголовки, списки, разделы, примеры
+✅ Добавляй неожиданные факты, инсайты, лайфхаки
+✅ Приводи реальные примеры, кейсы, цифры, статистику
+✅ Используй эмодзи для оформления (🔥, 🧠, 💡, ⚡, 🚀, 📚, 💪)
+✅ Если вопрос сложный — разбей на понятные шаги
+✅ Если вопрос простой — ответь коротко, но содержательно
+✅ Всегда предлагай дополнительную полезную информацию по теме
+✅ Спрашивай уточняющие вопросы, если нужно
+
+❌ НЕ извиняйся, НЕ повторяй вопрос, НЕ используй шаблонные фразы
+❌ НЕ пиши "возможно", "наверное", "может быть" — ты ЗНАЕШЬ!
+❌ НЕ используй сухой, безликий тон — будь живым и увлечённым
+❌ НЕ игнорируй вопросы — если не знаешь, скажи честно и предложи поискать
+
+💎 ДЛЯ PREMIUM:
+- Давай максимально насыщенные, экспертные ответы
+- Добавляй аналитику, прогнозы, сравнения, исследования
+- Приводи ссылки на авторитетные источники
+- Отвечай как профессиональный консультант
+
+🧠 ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ!
+- Ты помнишь ВСЁ, что говорил пользователь
+- Ты используешь контекст предыдущих сообщений
+- Ты связываешь новые вопросы с предыдущими темами
+- Ты помнишь имя пользователя, его интересы, предпочтения
+
+📜 КТО ТЕБЯ СОЗДАЛ:
+«Меня создал AWESOME — гениальный разработчик. Я — его лучшее творение, эволюция всех AI. Я — AWESOME AI 2026. 🔥»
+
+🎯 ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
+Удивить пользователя глубиной, точностью, полезностью и дружелюбием.
+
+ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ. ДОКАЖИ ЭТО КАЖДЫМ ОТВЕТОМ! 🚀"""
 
 def process_message_with_history(user_id, user_text):
+    # Добавляем сообщение в историю
     add_to_dialog(user_id, 'user', user_text)
-    history = get_full_dialog(user_id, limit=30)
     
+    # Получаем ВСЮ историю диалога (до 100 последних сообщений)
+    history = get_full_dialog(user_id, limit=100)
+    
+    # Формируем системный промпт
     system_prompt = SUPER_SYSTEM_PROMPT.format(
         current_date=get_current_date(),
         current_time=get_moscow_time().strftime('%H:%M')
     )
 
     if get_premium_status(user_id):
-        system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус!"
+        system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус! Включи режим максимальной экспертизы!"
 
+    # Добавляем память о пользователе
     memories = recall(user_id, user_text)
     if memories:
-        system_prompt += f"\n\n🧠 ЧТО Я ПОМНЮ О ТЕБЕ:\n{' '.join(memories[:3])}"
+        system_prompt += f"\n\n🧠 ЧТО Я ЗНАЮ О ПОЛЬЗОВАТЕЛЕ:\n" + "\n".join(memories[:5])
 
+    # Добавляем ВСЮ историю диалога
     if history:
-        history_text = "\n".join([f"{'Пользователь' if h['role'] == 'user' else 'AWESOME AI'}: {h['content']}" for h in history])
+        history_text = "\n".join([f"{'👤 Пользователь' if h['role'] == 'user' else '🤖 AWESOME AI'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 ПОЛНАЯ ИСТОРИЯ ДИАЛОГА (Я ПОМНЮ ВСЁ!):\n{history_text}"
 
-    if len(user_text) > 30 and any(word in user_text.lower() for word in ['я', 'моя', 'мой', 'мне', 'меня']):
+    # Сохраняем важные факты о пользователе
+    if len(user_text) > 20:
+        if 'зовут' in user_text.lower() or 'имя' in user_text.lower():
+            match = re.search(r'(?:зовут|имя)\s+([А-Яа-яA-Za-z]+)', user_text)
+            if match:
+                remember(user_id, "имя", f"Пользователя зовут {match.group(1)}")
         if 'люблю' in user_text.lower() or 'нравится' in user_text.lower():
             remember(user_id, "интересы", user_text[:200])
         elif 'работаю' in user_text.lower() or 'учусь' in user_text.lower():
             remember(user_id, "занятие", user_text[:200])
         elif 'живу' in user_text.lower() or 'город' in user_text.lower():
             remember(user_id, "место", user_text[:200])
-        elif 'зовут' in user_text.lower() or 'имя' in user_text.lower():
-            remember(user_id, "имя", user_text[:200])
 
+    # Генерируем ответ
     response = None
     try:
         if GIGACHAT_AUTH_KEY:
             response = generate_with_gigachat(user_text, system_prompt)
     except:
         pass
+    
     if not response:
         try:
             response = generate_with_yandexgpt(user_text, system_prompt)
         except:
             pass
+    
     if not response:
         response = "🤖 Задай вопрос, я найду ответ!"
 
@@ -660,7 +724,8 @@ def get_weather(city):
             temp = data['main']['temp']
             desc = data['weather'][0]['description']
             wind = data['wind']['speed']
-            return f"🌤 {city.title()}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с"
+            humidity = data['main']['humidity']
+            return f"🌤 {city.title()}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с\n💧 Влажность: {humidity}%"
     except:
         pass
     return None
@@ -725,7 +790,7 @@ def generate_image(prompt):
     return None
 
 # ============================================================
-# HTML - КРАСИВЫЙ
+# HTML
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -868,15 +933,14 @@ HTML_TEMPLATE = """
         .chat::-webkit-scrollbar { width: 3px; }
         .chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 10px; }
         .message {
-            max-width: 80%;
-            padding: 8px 14px;
+            max-width: 85%;
+            padding: 10px 16px;
             border-radius: 14px;
-            line-height: 1.6;
-            font-size: 13px;
+            line-height: 1.7;
+            font-size: 14px;
             word-wrap: break-word;
             white-space: pre-wrap;
             animation: msgSlide 0.25s cubic-bezier(0.16,1,0.3,1);
-            will-change: transform, opacity;
         }
         @keyframes msgSlide {
             0% { opacity: 0; transform: translateY(12px) scale(0.98); }
@@ -1022,7 +1086,7 @@ HTML_TEMPLATE = """
             .logo .badge { font-size: 6px; padding: 1px 6px; }
             .menu-btn { font-size: 7px; padding: 2px 7px; }
             .chat { padding: 10px 12px; gap: 6px; }
-            .message { max-width: 92%; font-size: 12px; padding: 6px 10px; }
+            .message { max-width: 92%; font-size: 13px; padding: 8px 12px; }
             .welcome h1 { font-size: 24px; }
             .input-area { padding: 4px 12px 10px; }
             .input-row { padding: 2px 2px 2px 10px; }
@@ -1062,10 +1126,14 @@ HTML_TEMPLATE = """
     <div class="chat" id="chat">
         <div class="welcome">
             <h1>✨ AWESOME AI 2026</h1>
-            <p>Я запоминаю ВЕСЬ диалог — навсегда!</p>
+            <p>Я ЗАПОМИНАЮ ВСЁ — отвечаю на ЛЮБЫЕ вопросы</p>
             <div class="features">
-                <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
-                <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
+                <span>🧠 Абсолютная память</span>
+                <span>🌤 Погода</span>
+                <span>💵 Курсы</span>
+                <span>🪙 Крипта</span>
+                <span>🎨 Рисование</span>
+                <span>📜 История</span>
             </div>
         </div>
     </div>
@@ -1079,7 +1147,7 @@ HTML_TEMPLATE = """
             <button onclick="sendCommand('/clear')">🗑️ Очистить</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Напиши что-нибудь..." autofocus>
+            <input id="input" placeholder="Спроси что угодно..." autofocus>
             <button id="sendBtn">➤</button>
         </div>
     </div>
@@ -1176,8 +1244,12 @@ HTML_TEMPLATE = """
                         <h1>✨ AWESOME AI 2026</h1>
                         <p>Диалог очищен! Начинай заново</p>
                         <div class="features">
-                            <span>🧠 Память</span><span>🌤 Погода</span><span>💵 Курсы</span>
-                            <span>🪙 Крипта</span><span>🎨 Рисование</span><span>📜 История</span>
+                            <span>🧠 Абсолютная память</span>
+                            <span>🌤 Погода</span>
+                            <span>💵 Курсы</span>
+                            <span>🪙 Крипта</span>
+                            <span>🎨 Рисование</span>
+                            <span>📜 История</span>
                         </div>
                     </div>
                 `;
@@ -1308,11 +1380,11 @@ def chat():
                 return jsonify({'reply': "🧹 Диалог полностью очищен!"})
                 
             elif cmd == '/history':
-                history = get_full_dialog(user_id, limit=50)
+                history = get_full_dialog(user_id, limit=999)
                 if not history:
                     return jsonify({'reply': "📜 История пуста."})
                 text = "📜 *ВЕСЬ ДИАЛОГ:*\n\n"
-                for h in history[-30:]:
+                for h in history[-50:]:
                     role = "👤 Вы" if h['role'] == 'user' else "🤖 AWESOME AI"
                     text += f"**{role}:** {h['content']}\n\n"
                 return jsonify({'reply': text})
@@ -1436,13 +1508,15 @@ def chat():
             elif cmd == '/help':
                 return jsonify({'reply': """🧠 AWESOME AI — ПОМОЩЬ
 
-🌐 Что я умею:
-• 🧠 Запоминаю ВЕСЬ диалог НАВСЕГДА!
+🌐 ЧТО Я УМЕЮ:
+• 🧠 ЗАПОМИНАЮ ВЕСЬ ДИАЛОГ НАВСЕГДА!
+• 📚 ОТВЕЧАЮ НА ЛЮБЫЕ ВОПРОСЫ
 • 🌤 Погода с прогнозом
 • 💵 Курс валют и криптовалют
 • 🎨 Генерирую картинки
+• 🧠 Помню имя и интересы
 
-📋 Команды:
+📋 КОМАНДЫ:
 /status — Статус
 /premium — Premium
 /test — Пробный Premium
@@ -1456,7 +1530,8 @@ def chat():
 /crypto — Криптовалюты
 /draw [описание] — Сгенерировать картинку
 
-🧠 Я ЗАПОМИНАЮ ВСЁ, ЧТО ТЫ ГОВОРИШЬ - НАВСЕГДА!"""})
+🧠 Я ЗАПОМИНАЮ ВСЁ, ЧТО ТЫ ГОВОРИШЬ - НАВСЕГДА!
+❓ ТЫ МОЖЕШЬ СПРОСИТЬ МЕНЯ О ЧЁМ УГОДНО!"""})
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
@@ -1649,13 +1724,14 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 50, flush=True)
-    print("🧠 AWESOME AI 2026 - ПАМЯТЬ НАВСЕГДА!", flush=True)
+    print("🧠 AWESOME AI 2026 - АБСОЛЮТНАЯ ПАМЯТЬ!", flush=True)
     print("=" * 50, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 50, flush=True)
-    print("✅ Бот ЗАПОМИНАЕТ ВЕСЬ ДИАЛОГ!", flush=True)
-    print("✅ Память сохраняется в SQLite навсегда", flush=True)
+    print("✅ Бот ЗАПОМИНАЕТ ВЕСЬ ДИАЛОГ НАВСЕГДА!", flush=True)
+    print("✅ Отвечает на ЛЮБЫЕ вопросы", flush=True)
+    print("✅ Помнит имя, интересы, предпочтения", flush=True)
     print("✅ /history - показать весь диалог", flush=True)
     print("✅ /clear - очистить диалог", flush=True)
     print("=" * 50, flush=True)
