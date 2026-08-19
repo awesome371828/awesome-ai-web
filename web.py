@@ -48,7 +48,7 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# SUPABASE - ТОЛЬКО ОН!
+# SUPABASE
 # ============================================================
 SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
@@ -64,7 +64,7 @@ except Exception as e:
     sys.exit(1)
 
 # ============================================================
-# СОЗДАЁМ ТАБЛИЦЫ В SUPABASE (С _web)
+# СОЗДАЁМ ТАБЛИЦЫ
 # ============================================================
 print("📦 Создаём таблицы...", flush=True)
 
@@ -127,7 +127,28 @@ for sql in tables:
 print("✅ Таблицы созданы!", flush=True)
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ (ТОЛЬКО SUPABASE)
+# ВРЕМЯ
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+def format_date(date_str):
+    if not date_str:
+        return "неизвестно"
+    try:
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
+        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
+    except:
+        return date_str
+
+def get_current_date():
+    return get_moscow_time().strftime('%d.%m.%Y')
+
+# ============================================================
+# ФУНКЦИИ БАЗЫ (SUPABASE)
 # ============================================================
 def get_db_user(user_id):
     try:
@@ -393,28 +414,7 @@ def recall(user_id, topic):
         return []
 
 # ============================================================
-# ВРЕМЯ
-# ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
-
-def format_date(date_str):
-    if not date_str:
-        return "неизвестно"
-    try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
-        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
-    except:
-        return date_str
-
-def get_current_date():
-    return get_moscow_time().strftime('%d.%m.%Y')
-
-# ============================================================
-# ДИАЛОГИ (В ПАМЯТИ ДЛЯ БЫСТРОТЫ)
+# ДИАЛОГИ
 # ============================================================
 dialogs = {}
 chat_list = {}
@@ -784,7 +784,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML - ПОЛНАЯ КОПИЯ DEEPSEEK
+# HTML
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -2014,7 +2014,6 @@ def analyze_image():
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
         
-        # Пробуем GigaChat Vision
         analysis = analyze_image_with_gigachat(image_base64)
         if not analysis:
             analysis = simple_image_analysis(image_base64)
@@ -2254,7 +2253,7 @@ def chat():
 
 💎 **Купить Premium: @awesomeneiro_bot**
 
-🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!""""})
+🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!""")
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
@@ -2280,7 +2279,6 @@ def chat():
                 if not prompt:
                     return jsonify({'reply': "❌ Напиши: /draw [описание]"})
                 
-                # Генерируем картинку
                 image_data = generate_image_fallback(prompt)
                 if image_data:
                     b64_img = base64.b64encode(image_data).decode('utf-8')
