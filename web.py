@@ -30,7 +30,7 @@ OWNER_ID = 6652898792
 OWNER_USERNAME = "flidges"
 
 FREE_LIMIT = 20
-MAX_HISTORY = 30
+MAX_HISTORY = 50
 MOSCOW_TZ = timezone(timedelta(hours=3))
 CACHE = {}; CACHE_TTL = 60
 
