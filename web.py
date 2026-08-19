@@ -854,6 +854,28 @@ async function init(){const me=await api('/api/me');if(me.ok){currentUserId=me.u
 document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
+@app.route('/api/owner_reset', methods=['POST'])
+def api_owner_reset():
+    """Сброс пароля ТОЛЬКО для владельца (без входа)"""
+    d = request.json
+    tg = str(d.get('telegram_id', '')).strip()
+    new_pw = str(d.get('password', ''))
+    # Только владелец может сбросить
+    if str(tg) != str(OWNER_ID):
+        return jsonify({'ok': False, 'error': 'Доступ запрещён'})
+    if len(new_pw) < 3:
+        return jsonify({'ok': False, 'error': 'Пароль мин. 3 символа'})
+    conn = get_db(); cur = conn.cursor()
+    # Обновляем пароль и создаём аккаунт, если его нет
+    cur.execute("""INSERT INTO users (user_id, name, password, telegram_id, messages_today, last_reset, is_owner, theme, joined_at)
+                   VALUES (%s, 'AWESOME', %s, %s, 0, %s, 1, 'dark', %s)
+                   ON CONFLICT (user_id) DO UPDATE SET password = EXCLUDED.password""",
+                (str(OWNER_ID), hash_pw(new_pw), str(OWNER_ID), gm().strftime('%Y-%m-%d'), now_iso()))
+    cur.execute("INSERT INTO total_stats_web (user_id, total_messages) VALUES (%s, 0) ON CONFLICT DO NOTHING", (str(OWNER_ID),))
+    conn.commit(); cur.close(); conn.close()
+    return jsonify({'ok': True, 'error': None})
+
+
 if __name__ == '__main__':
     print("="*60)
     print("🧠 AWESOME AI WEB — вход по Telegram-ID, связка бот+сайт+Supabase")
