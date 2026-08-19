@@ -2241,14 +2241,14 @@ def deladmin_cmd(m):
         user_command_ids[user_id].append(msg.message_id)
         return
     
-    if target_id == OWNER_ID:
+if target_id == OWNER_ID:
     msg = bot.send_message(chat_id, "⚠️ Нельзя забрать админку у владельца!")
     if user_id not in user_command_ids:
-        user_command_ids[user_id] = []   # ← СДЕЛАЙ ОТСТУП!
-    user_command_ids[user_id].append(m.message_id)
-    user_command_ids[user_id].append(msg.message_id)
-    return   # ← ЭТОТ return ВНУТРИ if - НОРМАЛЬНО
-
+        user_command_ids[user_id] = []              # ← 8 ПРОБЕЛОВ (4+4)
+        user_command_ids[user_id].append(m.message_id)   # ← 8 ПРОБЕЛОВ
+        user_command_ids[user_id].append(msg.message_id)  # ← 8 ПРОБЕЛОВ
+    return                                         # ← 4 ПРОБЕЛА (внутри if target_id)
+    
 set_admin(target_id, False)   # ← ЭТОТ КОД ВЫПОЛНИТСЯ
 msg = bot.send_message(chat_id, f"👋 У пользователя {target_id} забрали админку!", parse_mode='Markdown')
 try:
