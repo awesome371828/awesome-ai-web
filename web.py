@@ -2247,7 +2247,6 @@ if user_id not in user_command_ids:
     user_command_ids[user_id] = []
     user_command_ids[user_id].append(m.message_id)
     user_command_ids[user_id].append(msg.message_id)
-return
 
 set_admin(target_id, False)
 msg = bot.send_message(chat_id, f"👋 У пользователя {target_id} забрали админку!", parse_mode='Markdown')
