@@ -2220,7 +2220,7 @@ def deladmin_cmd(m):
             user_command_ids[user_id] = []
         user_command_ids[user_id].append(m.message_id)
         user_command_ids[user_id].append(msg.message_id)
-        return
+        return  # ← ЭТО ВНУТРИ ФУНКЦИИ - НОРМАЛЬНО
     
     args = m.text.split()[1:]
     if len(args) < 1:
@@ -2229,7 +2229,7 @@ def deladmin_cmd(m):
             user_command_ids[user_id] = []
         user_command_ids[user_id].append(m.message_id)
         user_command_ids[user_id].append(msg.message_id)
-        return
+        return  # ← ЭТО ВНУТРИ ФУНКЦИИ - НОРМАЛЬНО
     
     try:
         target_id = int(args[0])
