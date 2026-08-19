@@ -64,7 +64,7 @@ WEATHER_TIMEOUT = 2
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def init_web_db():
-    """Проверяет доступность таблиц сайта (таблицы созданы через Supabase SQL Editor)"""
+   """Проверяет доступность таблиц сайта (таблицы созданы через Supabase SQL Editor)"""
     checks = ['chats_web', 'messages_web', 'total_stats_web', 'premium_orders_web']
     ok = 0
     for t in checks:
@@ -74,7 +74,6 @@ def init_web_db():
         except Exception as e:
             print(f"⚠️ {t}: не найдена или нет доступа — {e}")
     print(f"✅ Проверено таблиц: {ok}/{len(checks)} (остальные создай в SQL Editor)")
-
 
 init_web_db()
 
