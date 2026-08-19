@@ -2253,7 +2253,7 @@ def chat():
 
 💎 **Купить Premium: @awesomeneiro_bot**
 
-🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!""")
+🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!"""
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
