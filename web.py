@@ -64,73 +64,17 @@ WEATHER_TIMEOUT = 2
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def init_web_db():
-    """Создаёт таблицы для сайта (с суффиксом _web)"""
-    try:
-        supabase.sql("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                premium INTEGER DEFAULT 0,
-                messages_today INTEGER DEFAULT 0,
-                last_reset TEXT,
-                premium_expires TEXT,
-                is_admin INTEGER DEFAULT 0,
-                test_used INTEGER DEFAULT 0,
-                joined_at TEXT,
-                is_owner INTEGER DEFAULT 0
-            )
-        """).execute()
-    except Exception as e:
-        print(f"⚠️ users: {e}")
+    """Проверяет доступность таблиц сайта (таблицы созданы через Supabase SQL Editor)"""
+    checks = ['chats_web', 'messages_web', 'total_stats_web', 'premium_orders_web']
+    ok = 0
+    for t in checks:
+        try:
+            supabase.table(t).select('*').limit(1).execute()
+            ok += 1
+        except Exception as e:
+            print(f"⚠️ {t}: не найдена или нет доступа — {e}")
+    print(f"✅ Проверено таблиц: {ok}/{len(checks)} (остальные создай в SQL Editor)")
 
-    try:
-        supabase.sql("""
-            CREATE TABLE IF NOT EXISTS chats_web (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                title TEXT,
-                created_at TEXT
-            )
-        """).execute()
-    except Exception as e:
-        print(f"⚠️ chats_web: {e}")
-
-    try:
-        supabase.sql("""
-            CREATE TABLE IF NOT EXISTS messages_web (
-                id SERIAL PRIMARY KEY,
-                chat_id BIGINT,
-                role TEXT,
-                content TEXT,
-                created_at TEXT
-            )
-        """).execute()
-    except Exception as e:
-        print(f"⚠️ messages_web: {e}")
-
-    try:
-        supabase.sql("""
-            CREATE TABLE IF NOT EXISTS total_stats_web (
-                user_id BIGINT PRIMARY KEY,
-                total_messages INTEGER DEFAULT 0
-            )
-        """).execute()
-    except Exception as e:
-        print(f"⚠️ total_stats_web: {e}")
-
-    try:
-        supabase.sql("""
-            CREATE TABLE IF NOT EXISTS premium_orders_web (
-                order_id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                status TEXT DEFAULT 'pending',
-                created_at TEXT
-            )
-        """).execute()
-    except Exception as e:
-        print(f"⚠️ premium_orders_web: {e}")
-
-    print("✅ База данных Supabase (_web) готова")
 
 init_web_db()
 
