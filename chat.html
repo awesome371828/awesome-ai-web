@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Чат - AWESOME AI</title>
+    <style>
+        body { font-family: Arial; background: #0a0a1a; color: white; }
+        #chat-box { height: 500px; overflow-y: auto; border: 1px solid #333; padding: 20px; margin: 20px; }
+        .message { padding: 10px; margin: 5px; border-radius: 10px; }
+        .user { background: #6c3ce0; text-align: right; }
+        .bot { background: #1a1a3a; text-align: left; }
+        #input-area { display: flex; padding: 20px; }
+        #input-area input { flex: 1; padding: 15px; border-radius: 10px; border: none; }
+        #input-area button { background: #6c3ce0; padding: 15px 30px; border: none; border-radius: 10px; color: white; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>💬 Чат с AWESOME AI</h1>
+    <div id="chat-box"></div>
+    <div id="input-area">
+        <input type="text" id="message" placeholder="Напиши сообщение..." />
+        <button onclick="sendMessage()">Отправить</button>
+    </div>
+    <script>
+        function sendMessage() {
+            const input = document.getElementById('message');
+            const msg = input.value.trim();
+            if (!msg) return;
+            
+            const chatBox = document.getElementById('chat-box');
+            chatBox.innerHTML += `<div class="message user">${msg}</div>`;
+            input.value = '';
+            
+            fetch('/api/chat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: msg})
+            })
+            .then(res => res.json())
+            .then(data => {
+                chatBox.innerHTML += `<div class="message bot">${data.response}</div>`;
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+        }
+        document.getElementById('message').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
