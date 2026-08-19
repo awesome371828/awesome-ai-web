@@ -2982,7 +2982,8 @@ keep_alive_thread.start()
 init_db()
 init_memory_db()
 
-app = bot  # ← ДОБАВЬ ЭТУ СТРОКУ!
+# ===== ВАЖНО: WSGI-совместимая переменная для Flask =====
+app = bot  # <- ЭТО НУЖНО ДЛЯ WSGI!
 
 print("=" * 60)
 print("🧠 AWESOME AI 2026 — СУПЕР-БЫСТРЫЙ!")
@@ -3023,6 +3024,8 @@ try:
 except:
     pass
 
+# ===== ТОЛЬКО ДЛЯ ЗАПУСКА НА ЛОКАЛЬНОЙ МАШИНЕ =====
+# Если вы запускаете через python напрямую (не через Flask)
 if __name__ == "__main__":
     while True:
         try:
