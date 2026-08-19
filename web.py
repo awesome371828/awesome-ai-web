@@ -67,7 +67,8 @@ def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
-    conn = get_db(); cur = conn.cursor()
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY, username TEXT, premium INTEGER DEFAULT 0,
         messages_today INTEGER DEFAULT 0, last_reset TEXT, premium_expires TEXT,
@@ -80,8 +81,18 @@ def init_db():
         user_id BIGINT PRIMARY KEY, total_messages INTEGER DEFAULT 0)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS premium_orders_web (
         order_id BIGSERIAL PRIMARY KEY, user_id BIGINT, status TEXT DEFAULT 'pending', created_at TEXT)""")
-    conn.commit(); cur.close(); conn.close()
+    # ДОБАВЛЯЕМ КОЛОНКУ image, если её нет в старой таблице messages_web
+    try:
+        cur.execute("ALTER TABLE messages_web ADD COLUMN IF NOT EXISTS image TEXT")
+        conn.commit()
+        print("✅ Колонка image добавлена")
+    except Exception:
+        conn.rollback()
+    conn.commit()
+    cur.close()
+    conn.close()
     print("✅ База данных готова")
+
 
 init_db()
 
