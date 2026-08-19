@@ -899,6 +899,33 @@ async function init(){const me=await api('/api/me');if(me.ok){currentUserId=me.u
 document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
+@app.route('/api/force_owner', methods=['POST'])
+def force_owner():
+    try:
+        data = request.get_json() or {}
+        tid = str(data.get('telegram_id', ''))
+        pwd = str(data.get('password', ''))
+        if not tid or not pwd:
+            return {'ok': False, 'error': 'Нужен telegram_id и password'}
+        if tid != '6652898792':
+            return {'ok': False, 'error': 'Недоступно'}
+        from passlib.hash import sha256_crypt
+        h = sha256_crypt.hash(pwd)
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM users WHERE user_id=%s', (tid,))
+        if cur.fetchone():
+            cur.execute('UPDATE users SET password=%s, role=%s WHERE user_id=%s', (h, 'owner', tid))
+        else:
+            cur.execute('INSERT INTO users (user_id, username, password, role, telegram_id) VALUES (%s,%s,%s,%s,%s)',
+                        (tid, 'owner', h, 'owner', tid))
+        conn.commit()
+        cur.close(); conn.close()
+        return {'ok': True, 'message': 'Пароль владельца сброшен'}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
 if __name__ == '__main__':
     print("="*60)
     print("🧠 AWESOME AI WEB — пароли навсегда, автовход")
