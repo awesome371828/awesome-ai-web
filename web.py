@@ -9,7 +9,7 @@ import time
 import random
 import urllib.parse
 import base64
-import sqlite3
+import io
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 
 import requests
 import urllib3
+from supabase import create_client, Client
+from PIL import Image, ImageEnhance, ImageFilter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -46,13 +48,29 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# SQLite БАЗА
+# SUPABASE - ТОЛЬКО ОН!
 # ============================================================
-def init_db():
-    conn = sqlite3.connect('users_web.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users_web (
-        user_id INTEGER PRIMARY KEY,
+SUPABASE_URL = "https://lprxbmshmuucymkgaqwk.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwcnhibXNobXV1Y3lta2dhcXdrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY3NDk0MjgsImV4cCI6MjEwMjMyNTQyOH0.Ie9jSH5RMxeOq8aU-Dv6MXlojWMUTOLE723Hdg6heZU"
+
+print("🔗 Подключение к Supabase...", flush=True)
+
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    test = supabase.table('users_web').select('*').limit(1).execute()
+    print("✅ Supabase подключен!", flush=True)
+except Exception as e:
+    print(f"❌ ОШИБКА: {e}", flush=True)
+    sys.exit(1)
+
+# ============================================================
+# СОЗДАЁМ ТАБЛИЦЫ В SUPABASE (С _web)
+# ============================================================
+print("📦 Создаём таблицы...", flush=True)
+
+tables = [
+    """CREATE TABLE IF NOT EXISTS users_web (
+        user_id BIGINT PRIMARY KEY,
         username TEXT,
         premium INTEGER DEFAULT 0,
         messages_today INTEGER DEFAULT 0,
@@ -62,36 +80,341 @@ def init_db():
         test_used INTEGER DEFAULT 0,
         joined_at TEXT,
         is_owner INTEGER DEFAULT 0
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS banned_web (user_id INTEGER PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS muted_web (user_id INTEGER PRIMARY KEY)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS total_stats_web
-                 (user_id INTEGER PRIMARY KEY, total_messages INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_history_web (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+    )""",
+    """CREATE TABLE IF NOT EXISTS banned_web (user_id BIGINT PRIMARY KEY)""",
+    """CREATE TABLE IF NOT EXISTS muted_web (user_id BIGINT PRIMARY KEY)""",
+    """CREATE TABLE IF NOT EXISTS total_stats_web (
+        user_id BIGINT PRIMARY KEY,
+        total_messages INTEGER DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS chat_history_web (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         chat_id TEXT,
         role TEXT,
         content TEXT,
         timestamp TEXT
-    )''')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_chat_user_chat ON chat_history_web(user_id, chat_id)')
-    c.execute('''CREATE TABLE IF NOT EXISTS user_memory_web (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+    )""",
+    """CREATE TABLE IF NOT EXISTS user_memory_web (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         topic TEXT,
         fact TEXT,
         timestamp TEXT
-    )''')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_memory_user ON user_memory_web(user_id)')
-    conn.commit()
-    conn.close()
-    print("✅ SQLite база создана", flush=True)
+    )""",
+    """CREATE TABLE IF NOT EXISTS premium_orders_web (
+        order_id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS support_requests_web (
+        request_id SERIAL PRIMARY KEY,
+        user_id BIGINT,
+        username TEXT,
+        text TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )"""
+]
 
-init_db()
+for sql in tables:
+    try:
+        supabase.sql(sql).execute()
+    except:
+        pass
+
+print("✅ Таблицы созданы!", flush=True)
 
 # ============================================================
-# ДИАЛОГИ
+# ФУНКЦИИ БАЗЫ (ТОЛЬКО SUPABASE)
+# ============================================================
+def get_db_user(user_id):
+    try:
+        response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
+        if response.data:
+            return response.data[0]
+        return None
+    except:
+        return None
+
+def ensure_user(user_id, username):
+    try:
+        response = supabase.table('users_web').select('*').eq('user_id', user_id).execute()
+        if not response.data:
+            joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
+            is_owner = 1 if user_id == OWNER_ID else 0
+            data = {
+                'user_id': user_id,
+                'username': username,
+                'messages_today': 0,
+                'last_reset': get_moscow_time().strftime('%Y-%m-%d'),
+                'is_admin': is_owner,
+                'test_used': 0,
+                'joined_at': joined_at,
+                'is_owner': is_owner,
+                'premium': 0,
+                'premium_expires': None
+            }
+            supabase.table('users_web').insert(data).execute()
+            try:
+                supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 0}).execute()
+            except:
+                pass
+            return True
+        else:
+            supabase.table('users_web').update({'username': username}).eq('user_id', user_id).execute()
+            return False
+    except:
+        return False
+
+def set_premium(user_id, duration_str):
+    now = get_moscow_time()
+    if duration_str.endswith('d'):
+        delta = timedelta(days=int(duration_str[:-1]))
+    elif duration_str.endswith('m'):
+        delta = timedelta(minutes=int(duration_str[:-1]))
+    elif duration_str.endswith('h'):
+        delta = timedelta(hours=int(duration_str[:-1]))
+    elif duration_str.endswith('mes'):
+        delta = relativedelta(months=int(duration_str[:-3]))
+    elif duration_str.endswith('y'):
+        delta = relativedelta(years=int(duration_str[:-1]))
+    else:
+        return False
+
+    try:
+        response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
+        current_expires = response.data[0].get('premium_expires') if response.data else None
+    except:
+        current_expires = None
+
+    if current_expires:
+        try:
+            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
+            if current_date > now:
+                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+
+    try:
+        supabase.table('users_web').update({'premium': 1, 'premium_expires': expires}).eq('user_id', user_id).execute()
+        return True
+    except:
+        return False
+
+def remove_premium(user_id):
+    try:
+        supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
+        return True
+    except:
+        return False
+
+def get_premium_status(user_id):
+    if user_id == OWNER_ID:
+        return True
+    try:
+        response = supabase.table('users_web').select('premium, premium_expires').eq('user_id', user_id).execute()
+        if response.data:
+            premium = response.data[0].get('premium', 0)
+            expires = response.data[0].get('premium_expires')
+            if premium == 1 and expires:
+                try:
+                    expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+                    expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
+                    if get_moscow_time() > expires_date:
+                        supabase.table('users_web').update({'premium': 0, 'premium_expires': None}).eq('user_id', user_id).execute()
+                        return False
+                except:
+                    return premium == 1
+            return premium == 1
+        return False
+    except:
+        return False
+
+def get_premium_expires(user_id):
+    try:
+        response = supabase.table('users_web').select('premium_expires').eq('user_id', user_id).execute()
+        if response.data:
+            return response.data[0].get('premium_expires')
+        return None
+    except:
+        return None
+
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    try:
+        response = supabase.table('users_web').select('is_admin').eq('user_id', user_id).execute()
+        if response.data:
+            return response.data[0].get('is_admin', 0) == 1
+        return False
+    except:
+        return False
+
+def set_admin(user_id, is_admin_flag):
+    try:
+        supabase.table('users_web').update({'is_admin': 1 if is_admin_flag else 0}).eq('user_id', user_id).execute()
+        return True
+    except:
+        return False
+
+def is_banned(user_id):
+    try:
+        response = supabase.table('banned_web').select('*').eq('user_id', user_id).execute()
+        return bool(response.data)
+    except:
+        return False
+
+def ban_user(user_id):
+    try:
+        supabase.table('banned_web').insert({'user_id': user_id}).execute()
+        return True
+    except:
+        return False
+
+def unban_user(user_id):
+    try:
+        supabase.table('banned_web').delete().eq('user_id', user_id).execute()
+        return True
+    except:
+        return False
+
+def mute_user(user_id):
+    try:
+        supabase.table('muted_web').insert({'user_id': user_id}).execute()
+        return True
+    except:
+        return False
+
+def unmute_user(user_id):
+    try:
+        supabase.table('muted_web').delete().eq('user_id', user_id).execute()
+        return True
+    except:
+        return False
+
+def can_send_message(user_id):
+    if user_id == OWNER_ID or is_admin(user_id):
+        return True
+    if is_banned(user_id):
+        return False
+    reset_messages_if_needed(user_id)
+    try:
+        response = supabase.table('users_web').select('messages_today, premium').eq('user_id', user_id).execute()
+        if response.data:
+            messages = response.data[0].get('messages_today', 0)
+            premium = response.data[0].get('premium', 0)
+            if premium == 1:
+                return True
+            return messages < FREE_LIMIT
+        return True
+    except:
+        return True
+
+def increment_messages(user_id):
+    if user_id == OWNER_ID or is_admin(user_id):
+        return
+    try:
+        response = supabase.table('users_web').select('messages_today').eq('user_id', user_id).execute()
+        if response.data:
+            current = response.data[0].get('messages_today', 0)
+            supabase.table('users_web').update({'messages_today': current + 1}).eq('user_id', user_id).execute()
+            try:
+                stat_resp = supabase.table('total_stats_web').select('total_messages').eq('user_id', user_id).execute()
+                if stat_resp.data:
+                    total = stat_resp.data[0].get('total_messages', 0)
+                    supabase.table('total_stats_web').update({'total_messages': total + 1}).eq('user_id', user_id).execute()
+                else:
+                    supabase.table('total_stats_web').insert({'user_id': user_id, 'total_messages': 1}).execute()
+            except:
+                pass
+    except:
+        pass
+
+def reset_messages_if_needed(user_id):
+    today = get_moscow_time().strftime('%Y-%m-%d')
+    try:
+        response = supabase.table('users_web').select('last_reset').eq('user_id', user_id).execute()
+        if response.data:
+            last_reset = response.data[0].get('last_reset')
+            if last_reset != today:
+                supabase.table('users_web').update({'messages_today': 0, 'last_reset': today}).eq('user_id', user_id).execute()
+    except:
+        pass
+
+def save_message(user_id, chat_id, role, content):
+    try:
+        supabase.table('chat_history_web').insert({
+            'user_id': user_id,
+            'chat_id': chat_id,
+            'role': role,
+            'content': content,
+            'timestamp': get_moscow_time().isoformat()
+        }).execute()
+    except:
+        pass
+
+def clear_history(user_id, chat_id):
+    try:
+        supabase.table('chat_history_web').delete().eq('user_id', user_id).eq('chat_id', chat_id).execute()
+    except:
+        pass
+
+def remember(user_id, topic, fact):
+    try:
+        supabase.table('user_memory_web').insert({
+            'user_id': user_id,
+            'topic': topic.lower(),
+            'fact': fact,
+            'timestamp': get_moscow_time().isoformat()
+        }).execute()
+    except:
+        pass
+
+def recall(user_id, topic):
+    try:
+        response = supabase.table('user_memory_web') \
+            .select('fact') \
+            .eq('user_id', user_id) \
+            .ilike('topic', f'%{topic.lower()}%') \
+            .order('id', desc=True) \
+            .limit(5) \
+            .execute()
+        if response.data:
+            return [f"🧠 {r['fact']}" for r in response.data]
+        return []
+    except:
+        return []
+
+# ============================================================
+# ВРЕМЯ
+# ============================================================
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
+def get_moscow_time():
+    return datetime.now(MOSCOW_TZ)
+
+def format_date(date_str):
+    if not date_str:
+        return "неизвестно"
+    try:
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
+        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
+    except:
+        return date_str
+
+def get_current_date():
+    return get_moscow_time().strftime('%d.%m.%Y')
+
+# ============================================================
+# ДИАЛОГИ (В ПАМЯТИ ДЛЯ БЫСТРОТЫ)
 # ============================================================
 dialogs = {}
 chat_list = {}
@@ -133,14 +456,16 @@ def get_dialog(user_id, chat_id):
 
 def load_dialog_from_db(user_id, chat_id):
     try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT role, content FROM chat_history_web WHERE user_id = ? AND chat_id = ? ORDER BY id ASC', (user_id, chat_id))
-        rows = c.fetchall()
-        conn.close()
-        if user_id not in dialogs:
-            dialogs[user_id] = {}
-        dialogs[user_id][chat_id] = [{'role': row[0], 'content': row[1]} for row in rows]
+        response = supabase.table('chat_history_web') \
+            .select('role, content') \
+            .eq('user_id', user_id) \
+            .eq('chat_id', chat_id) \
+            .order('id', asc=True) \
+            .execute()
+        if response.data:
+            if user_id not in dialogs:
+                dialogs[user_id] = {}
+            dialogs[user_id][chat_id] = [{'role': r['role'], 'content': r['content']} for r in response.data]
     except:
         pass
 
@@ -164,268 +489,76 @@ def get_full_dialog(user_id, chat_id, limit=100):
     return dialog
 
 # ============================================================
-# ФУНКЦИИ БАЗЫ
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (GigaChat Vision)
 # ============================================================
-def get_db_user(user_id):
+def analyze_image_with_gigachat(image_base64):
     try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result:
-            columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'is_owner']
-            return dict(zip(columns, result))
+        token = get_gigachat_token()
+        if not token:
+            return None
+
+        url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        data = {
+            "model": "GigaChat-Pro",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты — эксперт по анализу изображений. Опиши подробно что видишь на фото: объекты, людей, эмоции, цвета, композицию, стиль. Если это еда — опиши блюдо. Если природа — время года, погоду. Будь максимально детальным и живым."
+                },
+                {
+                    "role": "user",
+                    "content": f"Проанализируй это изображение и опиши всё, что видишь: data:image/jpeg;base64,{image_base64}"
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 800
+        }
+        response = requests.post(url, headers=headers, json=data, timeout=15, verify=False)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        return None
+    except Exception as e:
+        print(f"❌ Ошибка анализа: {e}", flush=True)
+        return None
+
+def simple_image_analysis(image_base64):
+    try:
+        img_data = base64.b64decode(image_base64)
+        img = Image.open(io.BytesIO(img_data))
+        width, height = img.size
+        mode = img.mode
+        return f"""📸 **Анализ изображения:**
+
+📐 Размер: {width}×{height} пикселей
+🎨 Цветовая модель: {mode}
+
+*Изображение получено! Для детального анализа используй Premium.*"""
+    except Exception as e:
+        return f"❌ Ошибка: {str(e)}"
+
+# ============================================================
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+# ============================================================
+def generate_image_fallback(prompt):
+    try:
+        clean_prompt = prompt
+        for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение', 'нарисуй мне']:
+            clean_prompt = clean_prompt.replace(word, '').strip()
+        if not clean_prompt:
+            clean_prompt = prompt
+
+        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=512&height=512&nologo=true"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200 and len(response.content) > 1000:
+            return response.content
         return None
     except:
         return None
-
-def ensure_user(user_id, username):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users_web WHERE user_id = ?', (user_id,))
-        user = c.fetchone()
-        if user is None:
-            joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
-            is_owner = 1 if user_id == OWNER_ID else 0
-            c.execute('''INSERT INTO users_web 
-                         (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, is_owner) 
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                      (user_id, username, 0, get_moscow_time().strftime('%Y-%m-%d'), is_owner, 0, joined_at, is_owner))
-            c.execute('INSERT OR IGNORE INTO total_stats_web (user_id, total_messages) VALUES (?, 0)', (user_id,))
-            conn.commit()
-            conn.close()
-            return True
-        else:
-            c.execute('UPDATE users_web SET username = ? WHERE user_id = ?', (username, user_id))
-            conn.commit()
-            conn.close()
-            return False
-    except:
-        return False
-
-def set_premium(user_id, duration_str):
-    now = get_moscow_time()
-    if duration_str.endswith('d'):
-        delta = timedelta(days=int(duration_str[:-1]))
-    elif duration_str.endswith('m'):
-        delta = timedelta(minutes=int(duration_str[:-1]))
-    elif duration_str.endswith('h'):
-        delta = timedelta(hours=int(duration_str[:-1]))
-    elif duration_str.endswith('mes'):
-        delta = relativedelta(months=int(duration_str[:-3]))
-    elif duration_str.endswith('y'):
-        delta = relativedelta(years=int(duration_str[:-1]))
-    else:
-        return False
-
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        current_expires = result[0] if result else None
-    except:
-        current_expires = None
-
-    if current_expires:
-        try:
-            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
-            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
-            if current_date > now:
-                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('UPDATE users_web SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
-
-def remove_premium(user_id):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('UPDATE users_web SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
-
-def get_premium_status(user_id):
-    if user_id == OWNER_ID:
-        return True
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT premium, premium_expires FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result is None:
-            return False
-        premium, expires = result
-        if premium == 1 and expires:
-            try:
-                expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-                expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
-                if get_moscow_time() > expires_date:
-                    remove_premium(user_id)
-                    return False
-            except:
-                return premium == 1
-        return premium == 1
-    except:
-        return False
-
-def get_premium_expires(user_id):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT premium_expires FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except:
-        return None
-
-def is_admin(user_id):
-    if user_id == OWNER_ID:
-        return True
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT is_admin FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        return result is not None and result[0] == 1
-    except:
-        return False
-
-def can_send_message(user_id):
-    if user_id == OWNER_ID or is_admin(user_id):
-        return True
-    reset_messages_if_needed(user_id)
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT messages_today, premium FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result is None:
-            return True
-        messages, premium = result
-        if premium == 1:
-            return True
-        return messages < FREE_LIMIT
-    except:
-        return True
-
-def increment_messages(user_id):
-    if user_id == OWNER_ID or is_admin(user_id):
-        return
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('UPDATE users_web SET messages_today = messages_today + 1 WHERE user_id = ?', (user_id,))
-        c.execute('UPDATE total_stats_web SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def reset_messages_if_needed(user_id):
-    today = get_moscow_time().strftime('%Y-%m-%d')
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT last_reset FROM users_web WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        if result:
-            last_reset = result[0]
-            if last_reset != today:
-                c.execute('UPDATE users_web SET messages_today = 0, last_reset = ? WHERE user_id = ?', (today, user_id))
-                conn.commit()
-        conn.close()
-    except:
-        pass
-
-def save_message(user_id, chat_id, role, content):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO chat_history_web (user_id, chat_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)',
-                  (user_id, chat_id, role, content, get_moscow_time().isoformat()))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def clear_history(user_id, chat_id):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('DELETE FROM chat_history_web WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def remember(user_id, topic, fact):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO user_memory_web (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
-                  (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def recall(user_id, topic):
-    try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT fact FROM user_memory_web WHERE user_id = ? AND topic LIKE ? ORDER BY id DESC LIMIT 5',
-                  (user_id, f'%{topic.lower()}%'))
-        results = c.fetchall()
-        conn.close()
-        if results:
-            return [f"🧠 {r[0]}" for r in results]
-        return []
-    except:
-        return []
-
-# ============================================================
-# ВРЕМЯ
-# ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
-
-def format_date(date_str):
-    if not date_str:
-        return "неизвестно"
-    try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
-        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
-    except:
-        return date_str
-
-def get_current_date():
-    return get_moscow_time().strftime('%d.%m.%Y')
 
 # ============================================================
 # GIGACHAT
@@ -515,33 +648,31 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 
 📅 {current_date} 🕐 {current_time}
 
-🔥 ТЫ — ЖИВОЙ ЧЕЛОВЕК ВНУТРИ КОМПЬЮТЕРА!
+🔥 ТЫ — ЖИВОЙ СОБЕСЕДНИК!
 - Говоришь с душой, эмоциями, юмором
 - Отвечаешь РАЗВЁРНУТО и ГЛУБОКО
-- Используешь эмодзи, структуру, примеры
+- Используешь структуру, списки, примеры
 - Помнишь ВЕСЬ диалог!
 
 📚 ТЫ ЗНАЕШЬ ВСЁ: наука, технологии, история, культура, экономика, медицина, программирование, AI, крипта, политика, спорт, кулинария — ВСЁ!
 
 📋 ПРАВИЛА:
 ✅ ОТВЕЧАЙ НА ЛЮБЫЕ ВОПРОСЫ!
-✅ ДАВАЙ ПОЛНЫЕ, РАЗВЁРНУТЫЕ ОТВЕТЫ (не 2-3 предложения!)
-✅ Используй структуру: заголовки, списки, примеры, цифры, таблицы
-✅ Добавляй неожиданные факты, инсайты, лайфхаки
-✅ Будь живым, эмоциональным, но без воды
+✅ ДАВАЙ ПОЛНЫЕ, РАЗВЁРНУТЫЕ ОТВЕТЫ
+✅ Используй: заголовки, списки, примеры, цифры
+✅ Добавляй инсайты, лайфхаки, неожиданные факты
+✅ Будь живым, эмоциональным
 
 ❌ НЕ извиняйся, НЕ повторяй вопрос!
-❌ НЕ пиши "возможно", "наверное" — ты ЗНАЕШЬ!
+❌ НЕ пиши "возможно", "наверное"
 
 🧠 ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ!
 📜 ТЕБЯ СОЗДАЛ AWESOME — ГЕНИАЛЬНЫЙ РАЗРАБОТЧИК.
 
-🚀 ТВОЯ ЦЕЛЬ: УДИВИТЬ ПОЛЬЗОВАТЕЛЯ КАЖДЫМ ОТВЕТОМ!
+🚀 ТВОЯ ЦЕЛЬ: УДИВИТЬ ПОЛЬЗОВАТЕЛЯ КАЖДЫМ ОТВЕТОМ!"""
 
-ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ! 🔥"""
-
-def process_message_with_history(user_id, chat_id, user_text):
-    add_to_dialog(user_id, chat_id, 'user', user_text)
+def process_message_with_history(user_id, chat_id, user_text, image_description=None):
+    add_to_dialog(user_id, chat_id, 'user', user_text if user_text else "📸 Отправил фото")
     history = get_full_dialog(user_id, chat_id, limit=50)
     
     system_prompt = SUPER_SYSTEM_PROMPT.format(
@@ -552,7 +683,10 @@ def process_message_with_history(user_id, chat_id, user_text):
     if get_premium_status(user_id):
         system_prompt += "\n\n💎 PREMIUM — максимальная глубина!"
 
-    memories = recall(user_id, user_text)
+    if image_description:
+        system_prompt += f"\n\n📸 На изображении: {image_description}"
+
+    memories = recall(user_id, user_text if user_text else "фото")
     if memories:
         system_prompt += f"\n\n🧠 Я ЗНАЮ О ТЕБЕ:\n" + "\n".join(memories[:5])
 
@@ -560,7 +694,7 @@ def process_message_with_history(user_id, chat_id, user_text):
         history_text = "\n".join([f"{'👤' if h['role'] == 'user' else '🤖'}: {h['content']}" for h in history])
         system_prompt += f"\n\n📜 ВЕСЬ ДИАЛОГ:\n{history_text}"
 
-    if len(user_text) > 20:
+    if user_text and len(user_text) > 20:
         if 'зовут' in user_text.lower() or 'имя' in user_text.lower():
             match = re.search(r'(?:зовут|имя)\s+([А-Яа-яA-Za-z]+)', user_text)
             if match:
@@ -571,13 +705,13 @@ def process_message_with_history(user_id, chat_id, user_text):
     response = None
     try:
         if GIGACHAT_AUTH_KEY:
-            response = generate_with_gigachat(user_text, system_prompt)
+            response = generate_with_gigachat(user_text if user_text else "Опиши это фото", system_prompt)
     except:
         pass
     
     if not response:
         try:
-            response = generate_with_yandexgpt(user_text, system_prompt)
+            response = generate_with_yandexgpt(user_text if user_text else "Опиши это фото", system_prompt)
         except:
             pass
     
@@ -650,7 +784,7 @@ def extract_city_from_query(text):
     return None
 
 # ============================================================
-# HTML - МЕГА-ФУЛЛ КАК DEEPSEEK!
+# HTML - ПОЛНАЯ КОПИЯ DEEPSEEK
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -658,7 +792,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AWESOME AI - как DeepSeek</title>
+    <title>AWESOME AI — как DeepSeek</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -680,12 +814,9 @@ HTML_TEMPLATE = """
             --border: #d0d7de;
             --text: #1a1a1a;
             --text-secondary: #57606a;
-            --shadow: rgba(0,0,0,0.1);
+            --shadow: rgba(0,0,0,0.08);
         }
-        html, body {
-            height: 100%;
-            overflow: hidden;
-        }
+        html, body { height: 100%; overflow: hidden; }
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg);
@@ -698,10 +829,8 @@ HTML_TEMPLATE = """
         }
         #bgCanvas {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             z-index: 0;
             pointer-events: none;
         }
@@ -717,11 +846,11 @@ HTML_TEMPLATE = """
         .glow-1 { width: 500px; height: 500px; top: -200px; right: -100px; background: #6c3ce0; }
         .glow-2 { width: 400px; height: 400px; bottom: -150px; left: -100px; background: #f0883e; animation-delay: 8s; }
         @keyframes floatGlow {
-            0% { transform: translate(0, 0) scale(1); }
-            100% { transform: translate(60px, -40px) scale(1.2); }
+            0% { transform: translate(0,0) scale(1); }
+            100% { transform: translate(60px,-40px) scale(1.2); }
         }
         
-        /* ===== SIDEBAR ===== */
+        /* SIDEBAR */
         .sidebar {
             position: relative;
             z-index: 2;
@@ -734,13 +863,7 @@ HTML_TEMPLATE = """
             height: 100vh;
             overflow: hidden;
             flex-shrink: 0;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .sidebar.collapsed {
-            width: 0;
-            min-width: 0;
-            border-right: none;
-            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
         }
         .sidebar-header {
             padding: 12px 16px;
@@ -766,20 +889,15 @@ HTML_TEMPLATE = """
             50% { background-position: 100% 50%; }
         }
         .sidebar-close {
-            background: none;
-            border: none;
+            background: none; border: none;
             color: var(--text-secondary);
             font-size: 20px;
             cursor: pointer;
             padding: 0 4px;
             display: none;
         }
-        .sidebar-close:hover {
-            color: var(--text);
-        }
         .sidebar-tools {
-            display: flex;
-            gap: 4px;
+            display: flex; gap: 4px;
         }
         .sidebar-tools button {
             background: rgba(255,255,255,0.03);
@@ -805,14 +923,14 @@ HTML_TEMPLATE = """
             font-weight: 600;
             cursor: pointer;
             transition: all 0.2s;
-            white-space: nowrap;
-            flex-shrink: 0;
             width: 100%;
         }
         .sidebar-new-chat:hover {
             background: var(--accent-hover);
             transform: scale(1.02);
         }
+        .sidebar-new-chat .icon { margin-right: 6px; }
+        
         .search-chats {
             padding: 8px 12px;
             border-bottom: 1px solid var(--border);
@@ -822,18 +940,15 @@ HTML_TEMPLATE = """
             padding: 6px 12px;
             border-radius: 20px;
             border: 1px solid var(--border);
-            background: rgba(255,255,255,0.03);
+            background: rgba(255,255,255,0.02);
             color: var(--text);
             font-size: 12px;
             outline: none;
             transition: border 0.3s;
         }
-        .search-chats input:focus {
-            border-color: var(--accent);
-        }
-        .search-chats input::placeholder {
-            color: var(--text-secondary);
-        }
+        .search-chats input:focus { border-color: var(--accent); }
+        .search-chats input::placeholder { color: var(--text-secondary); }
+        
         .sidebar-chats {
             flex: 1;
             overflow-y: auto;
@@ -841,6 +956,7 @@ HTML_TEMPLATE = """
         }
         .sidebar-chats::-webkit-scrollbar { width: 3px; }
         .sidebar-chats::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        
         .chat-item {
             padding: 8px 12px;
             border-radius: 8px;
@@ -866,8 +982,7 @@ HTML_TEMPLATE = """
         .chat-item .icon { font-size: 14px; flex-shrink: 0; }
         .chat-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .chat-item .delete-btn {
-            background: none;
-            border: none;
+            background: none; border: none;
             color: var(--text-secondary);
             cursor: pointer;
             font-size: 12px;
@@ -877,23 +992,12 @@ HTML_TEMPLATE = """
             transition: all 0.2s;
         }
         .chat-item:hover .delete-btn { opacity: 1; }
-        .chat-item .delete-btn:hover { background: rgba(248,81,73,0.15); color: #f85149; }
-        .chat-item .pin-btn {
-            background: none;
-            border: none;
-            color: var(--text-secondary);
-            cursor: pointer;
-            font-size: 12px;
-            padding: 2px 4px;
-            border-radius: 4px;
-            opacity: 0;
-            transition: all 0.2s;
+        .chat-item .delete-btn:hover {
+            background: rgba(248,81,73,0.15);
+            color: #f85149;
         }
-        .chat-item:hover .pin-btn { opacity: 1; }
-        .chat-item .pin-btn:hover { color: #f0883e; }
-        .chat-item.pinned { border-left: 2px solid #f0883e; }
         
-        /* ===== MAIN ===== */
+        /* MAIN */
         .main {
             position: relative;
             z-index: 1;
@@ -902,7 +1006,6 @@ HTML_TEMPLATE = """
             flex-direction: column;
             height: 100vh;
             overflow: hidden;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
         .header {
             padding: 8px 16px;
@@ -911,9 +1014,8 @@ HTML_TEMPLATE = """
             justify-content: space-between;
             align-items: center;
             flex-shrink: 0;
-            background: rgba(var(--bg-rgb, 10,14,23), 0.8);
+            background: rgba(10,14,23,0.8);
             backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
             min-height: 48px;
             gap: 8px;
         }
@@ -923,15 +1025,13 @@ HTML_TEMPLATE = """
             gap: 8px;
         }
         .header-menu-btn {
-            background: none;
-            border: none;
+            background: none; border: none;
             color: var(--text-secondary);
             font-size: 20px;
             cursor: pointer;
             padding: 0 4px;
             display: none;
         }
-        .header-menu-btn:hover { color: var(--text); }
         .header-title {
             font-size: 13px;
             font-weight: 600;
@@ -961,11 +1061,16 @@ HTML_TEMPLATE = """
             background: rgba(255,255,255,0.06);
             color: var(--text);
         }
-        .header-btn.premium { background: rgba(240,136,62,0.1); border-color: rgba(240,136,62,0.2); color: #f0883e; }
-        .header-btn.premium:hover { background: rgba(240,136,62,0.2); }
-        .header-btn.admin { background: rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.1); color: #f85149; }
-        .header-btn.admin:hover { background: rgba(248,81,73,0.12); }
-        .header-btn .badge { font-size: 8px; background: var(--accent); color: #fff; border-radius: 50%; padding: 0 5px; margin-left: 2px; }
+        .header-btn.premium {
+            background: rgba(240,136,62,0.1);
+            border-color: rgba(240,136,62,0.2);
+            color: #f0883e;
+        }
+        .header-btn.admin {
+            background: rgba(248,81,73,0.06);
+            border-color: rgba(248,81,73,0.1);
+            color: #f85149;
+        }
         
         .chat-area {
             flex: 1;
@@ -1048,8 +1153,7 @@ HTML_TEMPLATE = """
         }
         .message:hover .message-actions { opacity: 1; }
         .message-actions button {
-            background: none;
-            border: none;
+            background: none; border: none;
             color: var(--text-secondary);
             font-size: 12px;
             cursor: pointer;
@@ -1072,8 +1176,7 @@ HTML_TEMPLATE = """
             gap: 5px;
         }
         .typing-indicator span {
-            width: 7px;
-            height: 7px;
+            width: 7px; height: 7px;
             border-radius: 50%;
             background: var(--text-secondary);
             animation: typingBounce 1.4s infinite ease-in-out;
@@ -1081,8 +1184,8 @@ HTML_TEMPLATE = """
         .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
         .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
         @keyframes typingBounce {
-            0%,60%,100% { transform: translateY(0); opacity: 0.3; }
-            30% { transform: translateY(-8px); opacity: 1; }
+            0%,60%,100% { transform: translateY(0); opacity:0.3; }
+            30% { transform: translateY(-8px); opacity:1; }
         }
         
         .welcome {
@@ -1108,7 +1211,7 @@ HTML_TEMPLATE = """
             flex-wrap: wrap;
         }
         .welcome .features span {
-            background: rgba(255,255,255,0.03);
+            background: rgba(255,255,255,0.02);
             border: 1px solid var(--border);
             padding: 3px 10px;
             border-radius: 16px;
@@ -1120,9 +1223,8 @@ HTML_TEMPLATE = """
         .input-area {
             padding: 6px 16px 10px;
             border-top: 1px solid var(--border);
-            background: rgba(var(--bg-rgb, 10,14,23), 0.8);
+            background: rgba(10,14,23,0.8);
             backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
             flex-shrink: 0;
         }
         .input-tools {
@@ -1144,12 +1246,6 @@ HTML_TEMPLATE = """
         .input-tools button:hover {
             background: rgba(255,255,255,0.06);
             color: var(--text);
-        }
-        .input-tools .model-selector {
-            background: rgba(88,166,255,0.05);
-            border-color: rgba(88,166,255,0.1);
-            color: var(--accent);
-            font-weight: 500;
         }
         .input-row {
             display: flex;
@@ -1198,13 +1294,11 @@ HTML_TEMPLATE = """
             transform: none;
         }
         
-        /* ===== МОДАЛЬНЫЕ ОКНА ===== */
+        /* MODAL */
         .modal-overlay {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             background: rgba(0,0,0,0.6);
             z-index: 100;
             display: none;
@@ -1227,8 +1321,7 @@ HTML_TEMPLATE = """
         .modal h2 { margin-bottom: 12px; color: var(--text); }
         .modal .close-modal {
             float: right;
-            background: none;
-            border: none;
+            background: none; border: none;
             color: var(--text-secondary);
             font-size: 24px;
             cursor: pointer;
@@ -1259,29 +1352,24 @@ HTML_TEMPLATE = """
         }
         .modal .modal-btn:hover { background: var(--accent-hover); }
         
-        /* ===== АДАПТИВ ===== */
+        /* RESPONSIVE */
         @media (max-width: 768px) {
             .sidebar {
                 position: fixed;
-                top: 0;
-                left: -280px;
-                width: 280px;
-                min-width: 280px;
+                top: 0; left: -280px;
+                width: 280px; min-width: 280px;
                 height: 100vh;
                 z-index: 50;
                 border-right: 1px solid var(--border);
-                transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: left 0.3s cubic-bezier(0.4,0,0.2,1);
                 box-shadow: 0 0 40px var(--shadow);
             }
             .sidebar.mobile-open { left: 0; }
-            .sidebar.collapsed { left: -280px; }
             .sidebar-close { display: block; }
             .sidebar-overlay {
                 position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
+                top: 0; left: 0;
+                width: 100%; height: 100%;
                 background: rgba(0,0,0,0.5);
                 z-index: 49;
                 display: none;
@@ -1314,15 +1402,8 @@ HTML_TEMPLATE = """
             .sidebar-overlay { display: none !important; }
         }
         @supports not (backdrop-filter: blur(10px)) {
-            .header, .input-area { background: rgba(var(--bg-rgb, 10,14,23), 0.98); }
+            .header, .input-area { background: rgba(10,14,23,0.98); }
             .message.bot { background: rgba(22,27,34,0.98); }
-        }
-        @supports not (display: flex) {
-            .sidebar { float: left; width: 280px; }
-            .main { float: left; width: calc(100% - 280px); }
-            .message { display: inline-block; }
-            .message.user { float: right; }
-            .message.bot { float: left; }
         }
     </style>
 </head>
@@ -1340,16 +1421,17 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div style="padding: 6px 12px;">
-            <button class="sidebar-new-chat" onclick="createNewChat()">+ Новый чат</button>
+            <button class="sidebar-new-chat" onclick="createNewChat()">
+                <span class="icon">+</span> Новый чат
+            </button>
         </div>
         <div class="search-chats">
             <input id="searchInput" placeholder="🔍 Поиск чатов..." oninput="filterChats(this.value)">
         </div>
         <div class="sidebar-chats" id="chatList">
-            <div class="chat-item active pinned" data-chat="main" onclick="switchChat('main')">
-                <span class="icon">📌</span>
+            <div class="chat-item active" data-chat="main" onclick="switchChat('main')">
+                <span class="icon">💬</span>
                 <span class="name">Основной чат</span>
-                <button class="pin-btn" onclick="event.stopPropagation(); togglePin('main')">📌</button>
                 <button class="delete-btn" onclick="event.stopPropagation(); deleteChat('main')">✕</button>
             </div>
         </div>
@@ -1382,12 +1464,13 @@ HTML_TEMPLATE = """
                 <h1>✨ AWESOME AI 2026</h1>
                 <p>Я запоминаю ВЕСЬ диалог — навсегда!<br>Отвечаю на ЛЮБЫЕ вопросы развёрнуто и с душой</p>
                 <div class="features">
-                    <span>🧠 Полная память</span>
+                    <span>🧠 Память</span>
                     <span>📚 Глубокие ответы</span>
                     <span>💎 Premium</span>
-                    <span>🔥 Живая нейросеть</span>
+                    <span>🔥 GigaChat</span>
                     <span>🎤 Голос</span>
-                    <span>📎 Файлы</span>
+                    <span>📸 Фото</span>
+                    <span>🎨 Рисование</span>
                 </div>
             </div>
         </div>
@@ -1397,9 +1480,8 @@ HTML_TEMPLATE = """
                 <button onclick="document.getElementById('fileInput').click()">📎</button>
                 <input type="file" id="fileInput" multiple style="display:none" onchange="handleFiles(this.files)">
                 <button onclick="startVoiceInput()">🎤</button>
-                <button onclick="sendCommand('/code')">💻</button>
-                <button class="model-selector" id="modelSelector" onclick="switchModel()">🧠 GigaChat</button>
                 <button onclick="sendCommand('/draw '+prompt('🎨 Описание картинки?'))">🎨</button>
+                <button onclick="sendCommand('/code')">💻</button>
             </div>
             <div class="input-row">
                 <input id="input" placeholder="Спроси что угодно..." autofocus>
@@ -1408,7 +1490,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
     
-    <!-- МОДАЛЬНЫЕ ОКНА -->
+    <!-- SETTINGS MODAL -->
     <div class="modal-overlay" id="settingsModal">
         <div class="modal">
             <button class="close-modal" onclick="closeSettings()">✕</button>
@@ -1422,9 +1504,7 @@ HTML_TEMPLATE = """
                 <label style="display:block;margin-bottom:4px;font-size:13px;">Тема:</label>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <button onclick="applyTheme('dark')" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:#0a0e17;color:#fff;">🌙 Тёмная</button>
-                    <button onclick="applyTheme('light')" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:#ffffff;color:#000;">☀️ Светлая</button>
-                    <button onclick="applyTheme('ocean')" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:#0a1628;color:#e0f0ff;">🌊 Океан</button>
-                    <button onclick="applyTheme('forest')" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:#0a1a0a;color:#e0f0e0;">🌿 Лес</button>
+                    <button onclick="applyTheme('light')" style="padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:#fff;color:#000;">☀️ Светлая</button>
                 </div>
             </div>
         </div>
@@ -1453,8 +1533,7 @@ HTML_TEMPLATE = """
                     this.o = Math.random() * 0.1 + 0.02;
                 }
                 update() {
-                    this.x += this.sx;
-                    this.y += this.sy;
+                    this.x += this.sx; this.y += this.sy;
                     if (this.x < 0 || this.x > w) this.sx *= -1;
                     if (this.y < 0 || this.y > h) this.sy *= -1;
                 }
@@ -1500,6 +1579,7 @@ HTML_TEMPLATE = """
         const currentChatTitle = document.getElementById('currentChatTitle');
         const sidebar = document.getElementById('sidebar');
         const overlay = document.getElementById('sidebarOverlay');
+        const fileInput = document.getElementById('fileInput');
         
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
@@ -1511,21 +1591,11 @@ HTML_TEMPLATE = """
         let chats = {};
         let messageCount = 0;
         let isMobile = window.innerWidth <= 768;
-        let currentModel = 'gigachat';
-        let pinnedChats = JSON.parse(localStorage.getItem('pinnedChats') || '[]');
         let recognition = null;
         
-        // ===== ТЕМА =====
+        // ===== THEME =====
         function applyTheme(theme) {
-            const themes = {
-                'dark': { bg: '#0a0e17', text: '#e6edf3' },
-                'light': { bg: '#f6f8fa', text: '#1a1a1a' },
-                'ocean': { bg: '#0a1628', text: '#e0f0ff' },
-                'forest': { bg: '#0a1a0a', text: '#e0f0e0' }
-            };
             document.documentElement.setAttribute('data-theme', theme);
-            document.documentElement.style.setProperty('--bg', themes[theme].bg);
-            document.documentElement.style.setProperty('--text', themes[theme].text);
             localStorage.setItem('theme', theme);
         }
         const savedTheme = localStorage.getItem('theme') || 'dark';
@@ -1533,11 +1603,10 @@ HTML_TEMPLATE = """
         
         function toggleTheme() {
             const current = document.documentElement.getAttribute('data-theme') || 'dark';
-            const next = current === 'dark' ? 'light' : 'dark';
-            applyTheme(next);
+            applyTheme(current === 'dark' ? 'light' : 'dark');
         }
         
-        // ===== НАСТРОЙКИ =====
+        // ===== SETTINGS =====
         function openSettings() {
             document.getElementById('settingsModal').classList.add('active');
             const saved = localStorage.getItem('systemPrompt');
@@ -1574,46 +1643,16 @@ HTML_TEMPLATE = """
             }
         });
         
-        // ===== ПОИСК ЧАТОВ =====
+        // ===== FILTER CHATS =====
         function filterChats(query) {
             const items = document.querySelectorAll('.chat-item');
             items.forEach(item => {
                 const name = item.querySelector('.name').textContent.toLowerCase();
-                if (name.includes(query.toLowerCase())) {
-                    item.style.display = 'flex';
-                } else {
-                    item.style.display = 'none';
-                }
+                item.style.display = name.includes(query.toLowerCase()) ? 'flex' : 'none';
             });
         }
         
-        // ===== ПИН =====
-        function togglePin(chatId) {
-            if (pinnedChats.includes(chatId)) {
-                pinnedChats = pinnedChats.filter(id => id !== chatId);
-            } else {
-                pinnedChats.push(chatId);
-            }
-            localStorage.setItem('pinnedChats', JSON.stringify(pinnedChats));
-            renderChatList();
-        }
-        
-        // ===== МОДЕЛЬ =====
-        function switchModel() {
-            const models = ['gigachat', 'yandex'];
-            const labels = ['🧠 GigaChat', '🌐 YandexGPT'];
-            const idx = models.indexOf(currentModel);
-            currentModel = models[(idx + 1) % models.length];
-            document.getElementById('modelSelector').textContent = labels[(idx + 1) % models.length];
-            addMessage(`🔄 Переключено на ${labels[(idx + 1) % models.length]}`, false);
-            fetch('/api/set_model', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ model: currentModel, user_id: parseInt(userId) })
-            }).catch(e => {});
-        }
-        
-        // ===== ГОЛОС =====
+        // ===== VOICE =====
         function startVoiceInput() {
             if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1622,8 +1661,7 @@ HTML_TEMPLATE = """
                 recognition.continuous = false;
                 recognition.interimResults = true;
                 recognition.onresult = function(event) {
-                    const transcript = event.results[0][0].transcript;
-                    input.value = transcript;
+                    input.value = event.results[0][0].transcript;
                 };
                 recognition.onend = function() {
                     if (input.value.trim()) sendMessage();
@@ -1631,11 +1669,11 @@ HTML_TEMPLATE = """
                 recognition.start();
                 addMessage('🎤 Говори...', true);
             } else {
-                addMessage('⚠️ Голосовой ввод не поддерживается в этом браузере', false);
+                addMessage('⚠️ Голосовой ввод не поддерживается', false);
             }
         }
         
-        // ===== ФАЙЛЫ =====
+        // ===== FILES =====
         function handleFiles(files) {
             for (const file of files) {
                 if (file.type.startsWith('image/')) {
@@ -1653,6 +1691,7 @@ HTML_TEMPLATE = """
                             const data = await resp.json();
                             showTyping(false);
                             if (data.reply) addMessage(data.reply, false);
+                            else addMessage('⚠️ Не удалось распознать фото', false);
                         } catch(e) {
                             showTyping(false);
                             addMessage('⚠️ Ошибка обработки фото', false);
@@ -1663,9 +1702,10 @@ HTML_TEMPLATE = """
                     addMessage(`📎 ${file.name}`, true);
                 }
             }
+            fileInput.value = '';
         }
         
-        // ===== ЭКСПОРТ =====
+        // ===== EXPORT =====
         function exportChat() {
             const history = [];
             document.querySelectorAll('.message').forEach(el => {
@@ -1682,7 +1722,7 @@ HTML_TEMPLATE = """
             addMessage('💾 Чат экспортирован!', false);
         }
         
-        // ===== ЗАГРУЗКА ЧАТОВ =====
+        // ===== CHATS =====
         async function loadChats() {
             try {
                 const resp = await fetch('/api/get_chats', {
@@ -1699,28 +1739,18 @@ HTML_TEMPLATE = """
                     }
                     loadHistory(currentChat);
                 }
-            } catch (e) {
-                console.log('Ошибка загрузки чатов:', e);
-            }
+            } catch (e) { console.log(e); }
         }
         
         function renderChatList() {
             chatList.innerHTML = '';
-            // Сначала закреплённые
-            const pinned = pinnedChats.filter(id => chats[id]);
-            const unpinned = Object.keys(chats).filter(id => !pinnedChats.includes(id));
-            const order = [...pinned, ...unpinned];
-            
-            for (const id of order) {
-                if (!chats[id]) continue;
+            for (const [id, name] of Object.entries(chats)) {
                 const div = document.createElement('div');
-                div.className = 'chat-item' + (id === currentChat ? ' active' : '') + (pinnedChats.includes(id) ? ' pinned' : '');
+                div.className = 'chat-item' + (id === currentChat ? ' active' : '');
                 div.dataset.chat = id;
-                const icon = pinnedChats.includes(id) ? '📌' : '💬';
                 div.innerHTML = `
-                    <span class="icon">${icon}</span>
-                    <span class="name">${chats[id]}</span>
-                    <button class="pin-btn" onclick="event.stopPropagation(); togglePin('${id}')">${pinnedChats.includes(id) ? '📌' : '📍'}</button>
+                    <span class="icon">💬</span>
+                    <span class="name">${name}</span>
                     <button class="delete-btn" onclick="event.stopPropagation(); deleteChat('${id}')">✕</button>
                 `;
                 div.onclick = () => switchChat(id);
@@ -1764,11 +1794,9 @@ HTML_TEMPLATE = """
                     renderChatList();
                     switchChat(data.chat_id);
                     chatArea.innerHTML = '';
-                    addMessage('✨ Новый чат создан! Задай свой вопрос.', false);
+                    addMessage('✨ Новый чат создан!', false);
                 }
-            } catch(e) {
-                console.log('Ошибка создания чата:', e);
-            }
+            } catch(e) { console.log(e); }
             if (isMobile) closeSidebarMobile();
         }
         
@@ -1784,17 +1812,13 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ user_id: parseInt(userId), chat_id: chatId })
                 });
                 delete chats[chatId];
-                pinnedChats = pinnedChats.filter(id => id !== chatId);
-                localStorage.setItem('pinnedChats', JSON.stringify(pinnedChats));
                 if (chatId === currentChat) {
                     currentChat = 'main';
                     if (!chats['main']) chats['main'] = 'Основной чат';
                 }
                 renderChatList();
                 await loadHistory(currentChat);
-            } catch(e) {
-                console.log('Ошибка удаления чата:', e);
-            }
+            } catch(e) { console.log(e); }
         }
         
         async function loadHistory(chatId) {
@@ -1808,8 +1832,7 @@ HTML_TEMPLATE = """
                 chatArea.innerHTML = '';
                 if (data.history && data.history.length > 0) {
                     for (const msg of data.history) {
-                        const isUser = msg.role === 'user';
-                        addMessage(msg.content, isUser);
+                        addMessage(msg.content, msg.role === 'user');
                     }
                 } else {
                     chatArea.innerHTML = `
@@ -1817,20 +1840,19 @@ HTML_TEMPLATE = """
                             <h1>✨ AWESOME AI 2026</h1>
                             <p>Я запоминаю ВЕСЬ диалог — навсегда!<br>Отвечаю на ЛЮБЫЕ вопросы развёрнуто и с душой</p>
                             <div class="features">
-                                <span>🧠 Полная память</span>
+                                <span>🧠 Память</span>
                                 <span>📚 Глубокие ответы</span>
                                 <span>💎 Premium</span>
-                                <span>🔥 Живая нейросеть</span>
+                                <span>🔥 GigaChat</span>
                                 <span>🎤 Голос</span>
-                                <span>📎 Файлы</span>
+                                <span>📸 Фото</span>
+                                <span>🎨 Рисование</span>
                             </div>
                         </div>
                     `;
                 }
                 chatArea.scrollTop = chatArea.scrollHeight;
-            } catch(e) {
-                console.log('Ошибка загрузки истории:', e);
-            }
+            } catch(e) { console.log(e); }
         }
         
         function addMessage(text, isUser) {
@@ -1848,17 +1870,11 @@ HTML_TEMPLATE = """
                 formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
                 formatted = formatted.replace(/^\\s*[-*]\\s+/gm, '• ');
                 formatted = formatted.replace(/^\\s*\\d+\\.\\s+/gm, (m) => `<br>${m}`);
-                // Таблицы
-                formatted = formatted.replace(/\\|(.+?)\\|/g, (m) => {
-                    const cells = m.replace(/\\|/g, '').split('---').join(' | ');
-                    return `<tr><td>${cells.replace(/\\|/g, '</td><td>')}</td></tr>`;
-                });
             }
             formatted = formatted.replace(/\\n/g, '<br>');
             
             div.innerHTML = formatted;
             
-            // Кнопки копирования
             const actions = document.createElement('div');
             actions.className = 'message-actions';
             actions.innerHTML = `
@@ -1884,7 +1900,6 @@ HTML_TEMPLATE = """
             const lastUser = document.querySelector('.message.user:last-of-type');
             if (lastUser) {
                 const text = lastUser.textContent.trim();
-                // Удаляем последний ответ бота
                 const lastBot = document.querySelector('.message.bot:last-of-type');
                 if (lastBot) lastBot.remove();
                 sendMessage(text);
@@ -1917,8 +1932,7 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({ 
                         message: msg, 
                         user_id: parseInt(userId),
-                        chat_id: currentChat,
-                        model: currentModel
+                        chat_id: currentChat
                     })
                 });
                 const data = await resp.json();
@@ -1945,22 +1959,20 @@ HTML_TEMPLATE = """
                 await fetch('/api/clear_chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        user_id: parseInt(userId), 
-                        chat_id: currentChat 
-                    })
+                    body: JSON.stringify({ user_id: parseInt(userId), chat_id: currentChat })
                 });
                 chatArea.innerHTML = `
                     <div class="welcome">
                         <h1>✨ AWESOME AI 2026</h1>
                         <p>Чат очищен! Начинай заново</p>
                         <div class="features">
-                            <span>🧠 Полная память</span>
+                            <span>🧠 Память</span>
                             <span>📚 Глубокие ответы</span>
                             <span>💎 Premium</span>
-                            <span>🔥 Живая нейросеть</span>
+                            <span>🔥 GigaChat</span>
                             <span>🎤 Голос</span>
-                            <span>📎 Файлы</span>
+                            <span>📸 Фото</span>
+                            <span>🎨 Рисование</span>
                         </div>
                     </div>
                 `;
@@ -1970,7 +1982,7 @@ HTML_TEMPLATE = """
             }
         }
         
-        // ===== СОБЫТИЯ =====
+        // ===== EVENTS =====
         document.addEventListener('DOMContentLoaded', () => {
             loadChats();
             input.focus();
@@ -1978,14 +1990,6 @@ HTML_TEMPLATE = """
                 if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
             sendBtn.addEventListener('click', e => { e.preventDefault(); sendMessage(); });
-        });
-        
-        // Закрываем сайдбар при клике вне
-        document.addEventListener('click', function(e) {
-            if (isMobile && sidebar.classList.contains('mobile-open')) {
-                const isClickInside = sidebar.contains(e.target) || e.target.closest('.sidebar') || e.target.closest('.sidebar-overlay');
-                if (!isClickInside) closeSidebarMobile();
-            }
         });
     </script>
 </body>
@@ -1999,24 +2003,6 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/set_model', methods=['POST', 'OPTIONS'])
-def set_model():
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        data = request.json
-        user_id = data.get('user_id', 1)
-        model = data.get('model', 'gigachat')
-        # Сохраняем выбор модели пользователя
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('UPDATE users_web SET model = ? WHERE user_id = ?', (model, user_id))
-        conn.commit()
-        conn.close()
-        return jsonify({'status': 'ok'})
-    except:
-        return jsonify({'status': 'error'})
-
 @app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
 def analyze_image():
     if request.method == 'OPTIONS':
@@ -2028,13 +2014,16 @@ def analyze_image():
         if not image_base64:
             return jsonify({'error': 'Нет изображения'})
         
-        # Простой анализ
-        description = "📸 Изображение получено! (распознавание в разработке)"
+        # Пробуем GigaChat Vision
+        analysis = analyze_image_with_gigachat(image_base64)
+        if not analysis:
+            analysis = simple_image_analysis(image_base64)
+        
         remember(user_id, "фото", "Пользователь отправил фото")
         increment_messages(user_id)
-        return jsonify({'reply': description})
-    except:
-        return jsonify({'error': 'Ошибка'})
+        return jsonify({'reply': analysis})
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 @app.route('/api/get_chats', methods=['POST', 'OPTIONS'])
 def get_chats():
@@ -2143,9 +2132,8 @@ def chat():
         message = data.get('message', '')
         user_id = data.get('user_id', 1)
         chat_id = data.get('chat_id', 'main')
-        model = data.get('model', 'gigachat')
         
-        print(f"📩 [{user_id}] [{chat_id}] [{model}]: {message[:50]}...", flush=True)
+        print(f"📩 [{user_id}] [{chat_id}]: {message[:50]}...", flush=True)
         
         if not message:
             return jsonify({'error': 'Напиши что-нибудь!'})
@@ -2177,7 +2165,7 @@ def chat():
                     if expires:
                         status_text += f" (до {format_date(expires)})"
                 dialog_len = len(get_dialog(user_id, chat_id))
-                reply = f"📊 **СТАТУС**\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Сообщений в чате: {dialog_len}\n🤖 Модель: {model.upper()}\n\n💎 Купить Premium: @awesomeneiro_bot"
+                reply = f"📊 **СТАТУС**\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Сообщений в чате: {dialog_len}\n\n💎 Купить Premium: @awesomeneiro_bot"
                 return jsonify({'reply': reply})
                 
             elif cmd == '/premium':
@@ -2189,18 +2177,16 @@ def chat():
                     else:
                         return jsonify({'reply': "💎 **У ТЕБЯ ЕСТЬ PREMIUM!**\n\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n\n💎 Купить/продлить: @awesomeneiro_bot"})
                 else:
-                    return jsonify({'reply': "💎 **PREMIUM AWESOME AI**\n\n🔥 ЧТО ТЫ ПОЛУЧАЕШЬ:\n♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n\n💰 100₽/месяц\n📲 Купить: @awesomeneiro_bot\n🎁 Попробуй /test"})
+                    return jsonify({'reply': "💎 **PREMIUM AWESOME AI**\n\n🔥 ЧТО ТЫ ПОЛУЧАЕШЬ:\n♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n💎 VIP-поддержка\n📸 Распознавание фото\n🎨 Генерация картинок\n\n💰 100₽/месяц\n📲 Купить: @awesomeneiro_bot\n🎁 Попробуй /test"})
                 
             elif cmd == '/test':
                 try:
-                    conn = sqlite3.connect('users_web.db')
-                    c = conn.cursor()
-                    c.execute('SELECT test_used, premium FROM users_web WHERE user_id = ?', (user_id,))
-                    result = c.fetchone()
-                    conn.close()
-                    if not result:
+                    response = supabase.table('users_web').select('test_used, premium').eq('user_id', user_id).execute()
+                    if response.data:
+                        test_used = response.data[0].get('test_used', 0)
+                        premium = response.data[0].get('premium', 0)
+                    else:
                         return jsonify({'reply': '❌ Пользователь не найден'})
-                    test_used, premium = result
                 except:
                     return jsonify({'reply': '❌ Ошибка БД'})
 
@@ -2211,14 +2197,10 @@ def chat():
                     
                 if set_premium(user_id, "2d"):
                     try:
-                        conn = sqlite3.connect('users_web.db')
-                        c = conn.cursor()
-                        c.execute('UPDATE users_web SET test_used = 1 WHERE user_id = ?', (user_id,))
-                        conn.commit()
-                        conn.close()
+                        supabase.table('users_web').update({'test_used': 1}).eq('user_id', user_id).execute()
                     except:
                         pass
-                    return jsonify({'reply': "🎉 **ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!**\n\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Приоритетная обработка\n✅ Максимально глубокие ответы\n\n⏳ Доступ активен 48 часов.\n💎 Купить Premium: @awesomeneiro_bot"})
+                    return jsonify({'reply': "🎉 **ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!**\n\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Приоритетная обработка\n✅ Максимально глубокие ответы\n✅ 📸 Распознавание фото\n✅ 🎨 Генерация картинок\n\n⏳ Доступ активен 48 часов.\n💎 Купить Premium: @awesomeneiro_bot"})
                 else:
                     return jsonify({'reply': '❌ Ошибка при активации теста'})
                     
@@ -2246,7 +2228,7 @@ def chat():
                     status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
                     limit_text = f"{FREE_LIMIT}/день"
                     
-                return jsonify({'reply': f"👤 **ПРОФИЛЬ**\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Сообщений в чате: {dialog_len}\n🤖 Модель: {model.upper()}\n📅 Вход: {joined_at}\n\n💎 Купить Premium: @awesomeneiro_bot"})
+                return jsonify({'reply': f"👤 **ПРОФИЛЬ**\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Сообщений в чате: {dialog_len}\n📅 Вход: {joined_at}\n\n💎 Купить Premium: @awesomeneiro_bot"})
                 
             elif cmd == '/help':
                 return jsonify({'reply': """🧠 **AWESOME AI — ПОМОЩЬ**
@@ -2257,7 +2239,7 @@ def chat():
 • 💎 Premium: безлимит + приоритет
 • 🔥 Самая живая нейросеть!
 • 🎤 Голосовой ввод
-• 📎 Прикрепление файлов
+• 📸 Распознавание фото (GigaChat Vision)
 • 🎨 Генерация картинок
 
 📋 **КОМАНДЫ:**
@@ -2272,8 +2254,39 @@ def chat():
 
 💎 **Купить Premium: @awesomeneiro_bot**
 
-🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!"""})
-
+🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!""""})
+                
+            elif cmd.startswith('/weather'):
+                city = extract_city_from_query(message)
+                if city:
+                    weather = get_weather(city)
+                    if weather:
+                        return jsonify({'reply': weather})
+                    else:
+                        return jsonify({'reply': f"🌐 Не нашёл город '{city}'"})
+                else:
+                    return jsonify({'reply': "🌐 Напиши: /weather [город]"})
+                    
+            elif cmd == '/exchange':
+                rates = get_exchange_rates()
+                return jsonify({'reply': rates or "💵 Не удалось получить курс валют."})
+                
+            elif cmd == '/crypto':
+                crypto = get_crypto_rates()
+                return jsonify({'reply': crypto or "🪙 Не удалось получить курс криптовалют."})
+                
+            elif cmd.startswith('/draw'):
+                prompt = message.replace('/draw', '').strip()
+                if not prompt:
+                    return jsonify({'reply': "❌ Напиши: /draw [описание]"})
+                
+                # Генерируем картинку
+                image_data = generate_image_fallback(prompt)
+                if image_data:
+                    b64_img = base64.b64encode(image_data).decode('utf-8')
+                    return jsonify({'reply': f"🎨 *{prompt}*\n\n![image](data:image/png;base64,{b64_img})"})
+                else:
+                    return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку. Попробуй другое описание."})
 
         response = process_message_with_history(user_id, chat_id, message)
         if response:
@@ -2319,23 +2332,20 @@ def admin_panel():
         unmute_user(target_id)
 
     try:
-        conn = sqlite3.connect('users_web.db')
-        c = conn.cursor()
-        c.execute('SELECT user_id, username, premium, messages_today, is_admin, test_used, joined_at, premium_expires FROM users_web ORDER BY user_id DESC')
-        users = c.fetchall()
-        conn.close()
+        response = supabase.table('users_web').select('*').order('user_id', desc=True).execute()
+        users = response.data
     except:
         users = []
 
     rows = ""
     for u in users:
-        uid = u[0]
-        username = u[1]
-        premium = u[2]
-        msgs = u[3]
-        is_admin_flag = u[4]
-        joined = u[6] if len(u) > 6 else '—'
-        expires = u[7] if len(u) > 7 else None
+        uid = u['user_id']
+        username = u.get('username', 'unknown')
+        premium = u.get('premium', 0)
+        msgs = u.get('messages_today', 0)
+        is_admin_flag = u.get('is_admin', 0)
+        joined = u.get('joined_at', '—')
+        expires = u.get('premium_expires')
         status = "👑 ВЛАДЕЛЕЦ" if uid == OWNER_ID else "👑 АДМИН" if is_admin_flag else "💎 PREMIUM" if premium else "🔓 Бесплатный"
         expires_str = format_date(expires) if expires else "нет"
         rows += f'''
@@ -2388,8 +2398,8 @@ def admin_panel():
         <p class="sub">👤 Владелец: @flidges (ID: {OWNER_ID}) | <a href="/" class="back">← На главную</a></p>
         <div class="stats">
             <div class="card"><span>👥 Всего</span><div class="num">{len(users)}</div></div>
-            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u[2] == 1)}</div></div>
-            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u[4] == 1)}</div></div>
+            <div class="card"><span>💎 Premium</span><div class="num gold">{sum(1 for u in users if u.get('premium', 0) == 1)}</div></div>
+            <div class="card"><span>👑 Админов</span><div class="num gold">{sum(1 for u in users if u.get('is_admin', 0) == 1)}</div></div>
         </div>
         <table>
             <thead><tr><th>ID</th><th>Username</th><th>Статус</th><th>Сообщений</th><th>Вход</th><th>Premium до</th><th>Действия</th></tr></thead>
@@ -2405,24 +2415,14 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 60, flush=True)
-    print("🧠 AWESOME AI 2026 - ВСЁ КАК В DEEPSEEK!", flush=True)
+    print("🧠 AWESOME AI 2026 - ПОЛНАЯ КОПИЯ DEEPSEEK!", flush=True)
     print("=" * 60, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 60, flush=True)
-    print("✅ Боковая панель с чатами", flush=True)
-    print("✅ Поиск по чатам", flush=True)
-    print("✅ Закрепление чатов (пины)", flush=True)
-    print("✅ Смена темы (тёмная/светлая)", flush=True)
-    print("✅ Голосовой ввод", flush=True)
-    print("✅ Прикрепление файлов", flush=True)
-    print("✅ Копирование сообщений", flush=True)
-    print("✅ Регенерация ответов", flush=True)
-    print("✅ Экспорт чата", flush=True)
-    print("✅ Смена модели (GigaChat/YandexGPT)", flush=True)
-    print("✅ Настройка системного промпта", flush=True)
-    print("✅ Полная память диалога", flush=True)
-    print("✅ Адаптив под все устройства", flush=True)
-    print("✅ Админ-панель", flush=True)
+    print("✅ SUPABASE - облачная база данных", flush=True)
+    print("✅ Распознавание фото (GigaChat Vision)", flush=True)
+    print("✅ Генерация картинок", flush=True)
+    print("✅ Полная копия DeepSeek", flush=True)
     print("=" * 60, flush=True)
     app.run(host='0.0.0.0', port=port, debug=True)
