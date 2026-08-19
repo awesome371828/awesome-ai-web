@@ -2230,7 +2230,7 @@ def chat():
                 return jsonify({'reply': f"👤 **ПРОФИЛЬ**\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Сообщений в чате: {dialog_len}\n📅 Вход: {joined_at}\n\n💎 Купить Premium: @awesomeneiro_bot"})
                 
             elif cmd == '/help':
-                return jsonify({'reply': """🧠 **AWESOME AI — ПОМОЩЬ**
+    return jsonify({'reply': """🧠 **AWESOME AI — ПОМОЩЬ**
 
 🌐 **ЧТО Я УМЕЮ:**
 • 🧠 ЗАПОМИНАЮ ВЕСЬ ДИАЛОГ НАВСЕГДА!
@@ -2253,7 +2253,7 @@ def chat():
 
 💎 **Купить Premium: @awesomeneiro_bot**
 
-🧠 Я запоминаю ВСЁ, что ты говоришь - НАВСЕГДА!"""
+🧠 Я запоминаю ВСЁ, просто задай свой вопрос!""")
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
