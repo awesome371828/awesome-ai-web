@@ -2242,14 +2242,14 @@ def deladmin_cmd(m):
         return
     
     if target_id == OWNER_ID:
-        msg = bot.send_message(chat_id, "❌ Нельзя забрать админку у владельца!")
-if user_id not in user_command_ids:
-    user_command_ids[user_id] = []
+    msg = bot.send_message(chat_id, "⚠️ Нельзя забрать админку у владельца!")
+    if user_id not in user_command_ids:
+        user_command_ids[user_id] = []   # ← СДЕЛАЙ ОТСТУП!
     user_command_ids[user_id].append(m.message_id)
     user_command_ids[user_id].append(msg.message_id)
-    return
-    
-set_admin(target_id, False)
+    return   # ← ЭТОТ return ВНУТРИ if - НОРМАЛЬНО
+
+set_admin(target_id, False)   # ← ЭТОТ КОД ВЫПОЛНИТСЯ
 msg = bot.send_message(chat_id, f"👋 У пользователя {target_id} забрали админку!", parse_mode='Markdown')
 try:
     bot.send_message(target_id, "👋 У ВАС ЗАБРАЛИ АДМИНКУ!", parse_mode='Markdown')
