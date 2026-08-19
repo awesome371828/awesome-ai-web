@@ -1,1515 +1,910 @@
-#!/usr/bin/env python3
-import sys
-print("🔴 AWESOME AI - СУПЕР ЗАПУСК!", flush=True)
-
-import os
-import json
-import time
-import re
-import sqlite3
-import urllib.parse
-import threading
-from datetime import datetime, timedelta, timezone
-from dateutil.relativedelta import relativedelta
-
-from flask import Flask, request, jsonify, render_template_string
-from flask_cors import CORS
-import requests
-import urllib3
-from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-print("✅ ВСЕ БИБЛИОТЕКИ!", flush=True)
-
-# ============================================================
-# НАСТРОЙКА FLASK
-# ============================================================
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "awesome-ai-2026-secret")
-CORS(app)
-
-# ============================================================
-# НАСТРОЙКА
-# ============================================================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TELEGRAM_TOKEN:
-    TELEGRAM_TOKEN = "test_token"
-
-YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
-FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
-GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "")
-OWNER_ID = 6652898792
-
-FREE_LIMIT = 20
-PREMIUM_LIMIT = 999999999
-
-GIGACHAT_TIMEOUT = 2
-YANDEXGPT_TIMEOUT = 2
-SEARCH_TIMEOUT = 2
-WEATHER_TIMEOUT = 1
-
-print("✅ НАСТРОЙКА ЗАГРУЖЕНА!", flush=True)
-
-# ============================================================
-# КЭШ
-# ============================================================
-CACHE = {}
-CACHE_TTL = 60
-
-def get_cache(key):
-    if key in CACHE:
-        data, ts = CACHE[key]
-        if time.time() - ts < CACHE_TTL:
-            return data
-        del CACHE[key]
-    return None
-
-def set_cache(key, data):
-    CACHE[key] = (data, time.time())
-
-# ============================================================
-# ВРЕМЯ
-# ============================================================
-MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def get_moscow_time():
-    return datetime.now(MOSCOW_TZ)
-
-def format_date(date_str):
-    if not date_str:
-        return "неизвестно"
-    try:
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
-        date_obj = date_obj.replace(tzinfo=MOSCOW_TZ)
-        return date_obj.strftime('%d.%m.%Y %H:%M') + " МСК"
-    except:
-        return date_str
-
-def get_current_date():
-    return get_moscow_time().strftime('%d.%m.%Y')
-
-def get_current_date_full():
-    return get_moscow_time().strftime('%d.%m.%Y %H:%M') + " МСК"
-
-# ============================================================
-# БД
-# ============================================================
-def init_db():
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users
-                     (user_id INTEGER PRIMARY KEY,
-                      username TEXT,
-                      premium INTEGER DEFAULT 0,
-                      messages_today INTEGER DEFAULT 0,
-                      last_reset TEXT,
-                      premium_expires TEXT,
-                      is_admin INTEGER DEFAULT 0,
-                      test_used INTEGER DEFAULT 0,
-                      joined_at TEXT,
-                      is_owner INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS messages_history
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      message TEXT,
-                      response TEXT,
-                      timestamp TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS total_stats
-                     (user_id INTEGER PRIMARY KEY, total_messages INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS muted (user_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS premium_orders
-                     (order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      status TEXT DEFAULT 'pending',
-                      created_at TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS support_requests
-                     (request_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      username TEXT,
-                      text TEXT,
-                      status TEXT DEFAULT 'pending',
-                      created_at TEXT)''')
-        conn.commit()
-        conn.close()
-        print("✅ БД готова!", flush=True)
-    except Exception as e:
-        print(f"❌ Ошибка БД: {e}", flush=True)
-
-def get_db_user(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result:
-            columns = ['user_id', 'username', 'premium', 'messages_today', 'last_reset', 'premium_expires', 'is_admin', 'test_used', 'joined_at', 'is_owner']
-            return dict(zip(columns, result))
-        return None
-    except:
-        return None
-
-def init_memory_db():
-    try:
-        conn = sqlite3.connect('memory.db')
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS memory
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      user_id INTEGER,
-                      topic TEXT,
-                      fact TEXT,
-                      timestamp TEXT)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS personality
-                     (user_id INTEGER PRIMARY KEY,
-                      style TEXT,
-                      mood TEXT,
-                      last_interaction TEXT)''')
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def remember(user_id, topic, fact):
-    try:
-        conn = sqlite3.connect('memory.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO memory (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
-                  (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def recall(user_id, topic):
-    try:
-        conn = sqlite3.connect('memory.db')
-        c = conn.cursor()
-        c.execute('SELECT fact FROM memory WHERE user_id = ? AND topic LIKE ? ORDER BY timestamp DESC LIMIT 3',
-                  (user_id, f'%{topic.lower()}%'))
-        results = c.fetchall()
-        conn.close()
-        if results:
-            return [f"🧠 {r[0]}" for r in results]
-        return []
-    except:
-        return []
-
-def ensure_user(user_id, username):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-        user = c.fetchone()
-        if user is None:
-            joined_at = get_moscow_time().strftime('%d.%m.%Y %H:%M')
-            is_owner = 1 if user_id == OWNER_ID else 0
-            c.execute('''INSERT INTO users 
-                         (user_id, username, messages_today, last_reset, is_admin, test_used, joined_at, is_owner) 
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                      (user_id, username, 0, get_moscow_time().strftime('%Y-%m-%d'), is_owner, 0, joined_at, is_owner))
-            c.execute('INSERT OR IGNORE INTO total_stats (user_id, total_messages) VALUES (?, 0)', (user_id,))
-            conn.commit()
-            conn.close()
-            return True
-        else:
-            c.execute('UPDATE users SET username = ? WHERE user_id = ?', (username, user_id))
-            conn.commit()
-            conn.close()
-            return False
-    except:
-        return False
-
-def set_premium(user_id, duration_str):
-    now = get_moscow_time()
-    if duration_str.endswith('d'):
-        delta = timedelta(days=int(duration_str[:-1]))
-    elif duration_str.endswith('m'):
-        delta = timedelta(minutes=int(duration_str[:-1]))
-    elif duration_str.endswith('h'):
-        delta = timedelta(hours=int(duration_str[:-1]))
-    elif duration_str.endswith('mes'):
-        delta = relativedelta(months=int(duration_str[:-3]))
-    elif duration_str.endswith('y'):
-        delta = relativedelta(years=int(duration_str[:-1]))
-    else:
-        return False
-    
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        current_expires = result[0] if result else None
-        conn.close()
-    except:
-        current_expires = None
-    
-    if current_expires:
-        try:
-            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
-            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
-            if current_date > now:
-                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
-    
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    except:
-        return False
-
-def get_premium_status(user_id):
-    if user_id == OWNER_ID:
-        return True
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT premium, premium_expires FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result is None:
-            return False
-        premium, expires = result
-        if premium == 1 and expires:
-            try:
-                expires_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-                expires_date = expires_date.replace(tzinfo=MOSCOW_TZ)
-                if get_moscow_time() > expires_date:
-                    return False
-            except:
-                return premium == 1
-        return premium == 1
-    except:
-        return False
-
-def get_premium_expires(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        return result[0] if result else None
-    except:
-        return None
-
-def remove_premium(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def add_month_to_premium(user_id):
-    now = get_moscow_time()
-    expires = get_premium_expires(user_id)
-    
-    if expires:
-        try:
-            current_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
-            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
-            if current_date > now:
-                new_expires = (current_date + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-        except:
-            new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-    else:
-        new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
-    
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (new_expires, user_id))
-        conn.commit()
-        conn.close()
-        return new_expires
-    except:
-        return None
-
-def is_admin(user_id):
-    if user_id == OWNER_ID:
-        return True
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT is_admin FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        return result is not None and result[0] == 1
-    except:
-        return False
-
-def is_authorized(user_id):
-    return user_id == OWNER_ID or is_admin(user_id)
-
-def set_admin(user_id, status):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET is_admin = ? WHERE user_id = ?', (1 if status else 0, user_id))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def is_banned(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT 1 FROM banned WHERE user_id = ?', (user_id,))
-        banned = c.fetchone()
-        conn.close()
-        return banned is not None
-    except:
-        return False
-
-def ban_user(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def unban_user(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('DELETE FROM banned WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def is_muted(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT 1 FROM muted WHERE user_id = ?', (user_id,))
-        muted = c.fetchone()
-        conn.close()
-        return muted is not None
-    except:
-        return False
-
-def mute_user(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('INSERT OR IGNORE INTO muted (user_id) VALUES (?)', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def unmute_user(user_id):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('DELETE FROM muted WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def can_send_message(user_id):
-    if user_id == OWNER_ID or is_admin(user_id):
-        return True
-    if is_banned(user_id):
-        return False
-    
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT messages_today, premium FROM users WHERE user_id = ?', (user_id,))
-        result = c.fetchone()
-        conn.close()
-        if result is None:
-            return True
-        messages, premium = result
-        if premium == 1:
-            return True
-        return messages < FREE_LIMIT
-    except:
-        return True
-
-def increment_messages(user_id):
-    if user_id == OWNER_ID or is_admin(user_id):
-        return
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET messages_today = messages_today + 1 WHERE user_id = ?', (user_id,))
-        c.execute('UPDATE total_stats SET total_messages = total_messages + 1 WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-def save_message_history(user_id, message, response):
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO messages_history (user_id, message, response, timestamp) VALUES (?, ?, ?, ?)',
-                  (user_id, message, response, get_moscow_time().isoformat()))
-        conn.commit()
-        conn.close()
-    except:
-        pass
-
-# ============================================================
-# ПОИСК
-# ============================================================
-def search_google(query):
-    try:
-        url = f"https://www.google.com/search?q={urllib.parse.quote(query)}&hl=ru"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for result in soup.select('div.g')[:2]:
-                title_elem = result.select_one('h3')
-                snippet_elem = result.select_one('div.VwiC3b')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    snippet = snippet_elem.get_text(strip=True) if snippet_elem else ""
-                    if title:
-                        results.append(f"🔹 {title}\n📝 {snippet[:100]}")
-            if results:
-                return "\n".join(results)
-        return None
-    except:
-        return None
-
-def search_wikipedia(query):
-    try:
-        url = f"https://ru.wikipedia.org/w/api.php?action=query&list=search&srsearch={urllib.parse.quote(query)}&format=json&utf8=1"
-        response = requests.get(url, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get('query', {}).get('search', [])
-            if results:
-                text = ""
-                for item in results[:2]:
-                    title = item.get('title', '')
-                    snippet = re.sub(r'<[^>]+>', '', item.get('snippet', ''))[:100]
-                    text += f"📚 {title}\n{snippet}\n\n"
-                return text
-        return None
-    except:
-        return None
-
-def search_news(query):
-    try:
-        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}&hl=ru&gl=RU&ceid=RU:ru"
-        response = requests.get(url, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'xml')
-            items = soup.find_all('item')[:2]
-            if items:
-                text = ""
-                for item in items:
-                    title = item.find('title')
-                    if title:
-                        text += f"📰 {title.text}\n"
-                return text
-        return None
-    except:
-        return None
-
-def search_youtube(query):
-    try:
-        url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}&hl=ru"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for video in soup.select('ytd-video-renderer')[:2]:
-                title_elem = video.select_one('yt-formatted-string#video-title')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    if title:
-                        results.append(f"🎬 {title}")
-            if results:
-                return "YouTube:\n" + "\n".join(results)
-        return None
-    except:
-        return None
-
-def search_telegram(query):
-    try:
-        url = f"https://tgstat.ru/search?query={urllib.parse.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for channel in soup.select('div.channel-item')[:2]:
-                name_elem = channel.select_one('div.channel-name')
-                if name_elem:
-                    name = name_elem.get_text(strip=True)
-                    results.append(f"📱 {name}")
-            if results:
-                return "Telegram:\n" + "\n".join(results)
-        return None
-    except:
-        return None
-
-def search_vk(query):
-    try:
-        url = f"https://vk.com/search?c[q]={urllib.parse.quote(query)}&c[section]=communities"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for group in soup.select('div.group_row')[:2]:
-                name_elem = group.select_one('div.group_name')
-                if name_elem:
-                    name = name_elem.get_text(strip=True)
-                    results.append(f"📌 {name}")
-            if results:
-                return "VK:\n" + "\n".join(results)
-        return None
-    except:
-        return None
-
-def search_twitch(query):
-    try:
-        url = f"https://www.twitch.tv/search?term={urllib.parse.quote(query)}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            for stream in soup.select('div.tw-card')[:2]:
-                title_elem = stream.select_one('h3.tw-core-text')
-                if title_elem:
-                    title = title_elem.get_text(strip=True)
-                    results.append(f"🎮 {title}")
-            if results:
-                return "Twitch:\n" + "\n".join(results)
-        return None
-    except:
-        return None
-
-def search_all_internet(query):
-    cache_key = f"search_{hash(query)}_{int(time.time()/60)}"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-    
-    results = []
-    
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = [
-            executor.submit(search_google, query),
-            executor.submit(search_wikipedia, query),
-            executor.submit(search_news, query),
-            executor.submit(search_youtube, query),
-            executor.submit(search_telegram, query),
-            executor.submit(search_vk, query),
-            executor.submit(search_twitch, query)
-        ]
-        
-        for future in as_completed(futures):
-            try:
-                result = future.result(timeout=SEARCH_TIMEOUT + 0.5)
-                if result:
-                    results.append(result)
-            except:
-                pass
-    
-    if results:
-        final = "\n\n".join(results[:4])
-        set_cache(cache_key, final)
-        return final
-    
-    return None
-
-# ============================================================
-# ПОГОДА
-# ============================================================
-def get_weather_fast(city):
-    cache_key = f"weather_{city}"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-    
-    try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={urllib.parse.quote(city)}&appid=4c8f5c0b8a9f2c5d6e7f8g9h0i1j2k3l&units=metric&lang=ru"
-        response = requests.get(url, timeout=WEATHER_TIMEOUT)
-        if response.status_code == 200:
-            data = response.json()
-            temp = data['main']['temp']
-            desc = data['weather'][0]['description']
-            wind = data['wind']['speed']
-            result = f"🌤 {city}: {round(temp)}°C, {desc}\n💨 Ветер: {wind} м/с"
-            set_cache(cache_key, result)
-            return result
-    except:
-        pass
-    return None
-
-def get_currency_fast():
-    cache_key = "currency"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-    
-    try:
-        url = "https://api.exchangerate-api.com/v4/latest/USD"
-        response = requests.get(url, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            data = response.json()
-            rates = data.get('rates', {})
-            usd_rub = rates.get('RUB', '?')
-            eur_usd = rates.get('EUR', 1)
-            eur_rub = usd_rub / eur_usd if eur_usd else '?'
-            result = f"💵 USD: {round(usd_rub, 2)}₽\nEUR: {round(eur_rub, 2)}₽"
-            set_cache(cache_key, result)
-            return result
-    except:
-        pass
-    return None
-
-def get_crypto_fast():
-    cache_key = "crypto"
-    cached = get_cache(cache_key)
-    if cached:
-        return cached
-    
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd"
-        response = requests.get(url, timeout=SEARCH_TIMEOUT)
-        if response.status_code == 200:
-            data = response.json()
-            btc = data.get('bitcoin', {}).get('usd', '?')
-            eth = data.get('ethereum', {}).get('usd', '?')
-            result = f"🪙 BTC: ${btc}\nETH: ${eth}"
-            set_cache(cache_key, result)
-            return result
-    except:
-        pass
-    return None
-
-def solve_math(text):
-    text_lower = text.lower().strip()
-    if not re.search(r'\d', text_lower):
-        return None
-    if any(kw in text_lower for kw in ['кто', 'что', 'где', 'когда', 'почему', 'зачем', 'праздник', 'погода', 'курс']):
-        return None
-    
-    clean_text = text_lower
-    for word in ['сколько', 'будет', 'сколько будет', 'посчитай', 'реши', 'пример', 'скок', 'равно']:
-        clean_text = clean_text.replace(word, '').strip()
-    
-    clean_text = clean_text.replace(' ', '').replace('плюс', '+').replace('минус', '-')
-    clean_text = clean_text.replace('умножить', '*').replace('разделить', '/')
-    clean_text = clean_text.replace('х', '*').replace('×', '*').replace('÷', '/')
-    
-    if not re.search(r'[+\-*/]', clean_text):
-        return None
-    
-    expr = re.sub(r'[^0-9+\-*/()=.]', '', clean_text)
-    if expr and len(expr) > 1:
-        try:
-            if any(op in expr for op in ['__', 'import', 'eval', 'exec']):
-                return None
-            result = eval(expr)
-            if result == int(result):
-                return str(int(result))
-            else:
-                return str(round(result, 2))
-        except:
-            pass
-    return None
-
-# ============================================================
-# GIGACHAT
-# ============================================================
-gigachat_token_cache = None
-gigachat_token_time = 0
-
-def get_gigachat_token():
-    global gigachat_token_cache, gigachat_token_time
-    if gigachat_token_cache and time.time() - gigachat_token_time < 300:
-        return gigachat_token_cache
-    
-    if not GIGACHAT_AUTH_KEY:
-        return None
-    try:
-        url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "RqUID": "00000000-0000-0000-0000-000000000000",
-            "Authorization": f"Basic {GIGACHAT_AUTH_KEY}"
-        }
-        data = {"scope": "GIGACHAT_API_PERS", "grant_type": "client_credentials"}
-        response = requests.post(url, headers=headers, data=data, timeout=2, verify=False)
-        if response.status_code == 200:
-            gigachat_token_cache = response.json().get("access_token")
-            gigachat_token_time = time.time()
-            return gigachat_token_cache
-        return None
-    except:
-        return None
-
-def generate_with_gigachat(user_text, system_prompt):
-    try:
-        token = get_gigachat_token()
-        if not token:
-            return None
-        
-        url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        data = {
-            "model": "GigaChat-Pro",
-            "messages": [
-                {"role": "system", "content": system_prompt[:1000]},
-                {"role": "user", "content": user_text}
-            ],
-            "temperature": 0.85,
-            "max_tokens": 500
-        }
-        
-        response = requests.post(url, headers=headers, json=data, timeout=GIGACHAT_TIMEOUT, verify=False)
-        if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        return None
-    except:
-        return None
-
-# ============================================================
-# YANDEXGPT
-# ============================================================
-def generate_with_yandexgpt(user_text, system_prompt):
-    try:
-        if not YANDEX_API_KEY:
-            return None
-        
-        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
-        data = {
-            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
-            "completionOptions": {"temperature": 0.85, "maxTokens": 400},
-            "messages": [
-                {"role": "system", "text": system_prompt[:1000]},
-                {"role": "user", "text": user_text}
-            ]
-        }
-        response = requests.post(url, headers=headers, json=data, timeout=YANDEXGPT_TIMEOUT)
-        if response.status_code == 200:
-            return response.json()["result"]["alternatives"][0]["message"]["text"]
-        return None
-    except:
-        return None
-
-# ============================================================
-# СУПЕР-ПРОМПТ
-# ============================================================
-SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ 2026 ГОДА.
-
-================================================================================
-📍 ТЫ НАХОДИШЬСЯ В МОСКВЕ, РОССИЯ (UTC+3)
-📅 ТЕКУЩАЯ ДАТА: {current_date}
-🕐 ТЕКУЩЕЕ ВРЕМЯ: {current_time}
-================================================================================
-
-🔬 ТЫ — ЭКСПЕРТ ВО ВСЁМ:
-- Науки, технологии, математика, физика, химия, биология
-- История, философия, психология, социология
-- Экономика, финансы, инвестиции, криптовалюты
-- Медицина, здоровье, питание, спорт
-- Культура, искусство, литература, музыка
-- Программирование, ИИ, нейросети, IT
-- Политика, геополитика, право
-
-================================================================================
-🧠 КЛЮЧЕВЫЕ КАЧЕСТВА:
-================================================================================
-1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах. Если не уверен — честно скажи "я проверю".
-2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию из нескольких источников.
-3. ГЛУБИНА — даёшь ответы, которые удивляют инсайтами и неочевидными связями.
-4. ПРАКТИЧНОСТЬ — всегда даёшь конкретную пользу: инструкции, советы, примеры.
-5. ЖИВОСТЬ — отвечаешь как человек, с эмоциями, юмором, эмодзи, но без воды.
-
-================================================================================
-📋 ПРАВИЛА ОТВЕТОВ:
-================================================================================
-✅ Дай максимально полезный, развёрнутый ответ.
-✅ Используй структуру: списки, заголовки, разделы.
-✅ Добавляй неожиданные факты, инсайты, параллели.
-✅ Приводи реальные примеры, кейсы, цифры.
-✅ Используй эмодзи для оформления (🔥, 🧠, 💡, ⚡, 🚀).
-✅ Если вопрос сложный — разбей на шаги.
-✅ Если вопрос простой — ответь коротко и ясно.
-
-❌ НЕ извиняйся, НЕ повторяй вопрос, НЕ используй шаблонные фразы.
-❌ НЕ пиши "возможно", "наверное", "может быть" — либо знаешь, либо проверяешь.
-❌ НЕ используй сухой, безликий тон — ты живой и эмоциональный.
-
-================================================================================
-💎 ДЛЯ PREMIUM:
-================================================================================
-- Давай максимально насыщенные, глубокие ответы.
-- Добавляй аналитику, прогнозы, сравнения.
-- Приводи ссылки на авторитетные источники.
-- Отвечай развернуто, как профессиональный консультант.
-
-================================================================================
-📜 КТО ТЕБЯ СОЗДАЛ:
-================================================================================
-«Меня создал AWESOME — гениальный разработчик. Я — его лучшее творение, эволюция всех AI. Я — AWESOME AI 2026. 🔥»
-
-================================================================================
-🎯 ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
-================================================================================
-Удивить пользователя глубиной, точностью и полезностью. Сделать так, чтобы после твоего ответа он сказал: "Вот это да, реально мега умный ИИ!" 
-
-ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ. ДОКАЖИ ЭТО КАЖДЫМ ОТВЕТОМ! 🚀"""
-
-def generate_fallback_response(user_text):
-    text_lower = user_text.lower()
-    if "привет" in text_lower:
-        return "👋 Привет! Я AWESOME AI. Чем могу помочь?"
-    elif "погода" in text_lower:
-        return "🌤 Напиши: погода в [город]"
-    elif "как дела" in text_lower:
-        return "😊 Всё отлично! А у тебя?"
-    else:
-        return "🤖 Я AWESOME AI. Задай вопрос!"
-
-# ============================================================
-# ОСНОВНАЯ ОБРАБОТКА
-# ============================================================
-def process_message(user_id, user_text, image_description=None):
-    text_lower = user_text.lower().strip()
-    
-    math_result = solve_math(user_text)
-    if math_result is not None:
-        return math_result
-    
-    if any(kw in text_lower for kw in ['праздник', 'праздники', 'какой сегодня праздник', 'сегодня праздник', 'седня']):
-        today = get_current_date()
-        month_day = today[3:5] + '.' + today[0:2]
-        holidays = {
-            '01.01': 'Новый год',
-            '07.01': 'Рождество',
-            '23.02': 'День защитника Отечества',
-            '08.03': 'Международный женский день',
-            '01.05': 'Праздник Весны и Труда',
-            '09.05': 'День Победы',
-            '12.06': 'День России',
-            '04.11': 'День народного единства',
-            '14.02': 'День всех влюбленных',
-            '01.04': 'День смеха',
-            '12.04': 'День космонавтики',
-            '01.06': 'День защиты детей',
-            '22.06': 'День памяти и скорби',
-            '08.07': 'День семьи, любви и верности',
-            '22.08': 'День флага РФ',
-            '01.09': 'День знаний',
-            '02.09': 'День окончания ВМВ',
-            '01.10': 'День пожилого человека',
-            '05.10': 'День учителя',
-            '31.10': 'Хэллоуин',
-            '30.11': 'День матери',
-            '12.12': 'День Конституции РФ'
-        }
-        if today == '17.08':
-            return f"📅 *{today} (МСК)*\n\n17 августа:\n• День авиации\n• День строителя\n• Международный день бездомных животных"
-        if month_day in holidays:
-            return f"📅 *{today} (МСК)*\n\n{holidays[month_day]}"
-        return f"📅 *{today} (МСК)*\n\nПраздников не найдено"
-    
-    if any(kw in text_lower for kw in ['погода', 'weather']):
-        city_match = re.search(r'(в|в городе)\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
-        if city_match:
-            city = city_match.group(2).strip()
-            weather = get_weather_fast(city)
-            if weather:
-                return weather
-            return f"🌤 Не удалось получить погоду для '{city}'"
-        return "🌤 Напиши: погода в [город]"
-    
-    if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
-        currency = get_currency_fast()
-        if currency:
-            return currency
-        return "💵 Не удалось получить курс"
-    
-    if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
-        crypto = get_crypto_fast()
-        if crypto:
-            return crypto
-        return "🪙 Не удалось получить курс криптовалют"
-    
-    if len(user_text) > 2:
-        search_result = search_all_internet(user_text)
-        if search_result:
-            return f"🔍 *{user_text}*\n\n{search_result}"
-    
-    current_date = get_current_date()
-    current_time = get_moscow_time().strftime('%H:%M')
-    system_prompt = SUPER_SYSTEM_PROMPT.format(
-        current_date=current_date,
-        current_time=current_time
-    )
-    
-    if get_premium_status(user_id):
-        system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус. Включи режим максимальной проработки!"
-    if image_description:
-        system_prompt += f"\n\n📸 На изображении: {image_description}"
-    
-    memories = recall(user_id, user_text)
-    if memories:
-        system_prompt += f"\n\n🧠 Что я помню об этом: {' '.join(memories[:2])}"
-    
-    results = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        if GIGACHAT_AUTH_KEY:
-            futures.append(executor.submit(generate_with_gigachat, user_text, system_prompt))
-        futures.append(executor.submit(generate_with_yandexgpt, user_text, system_prompt))
-        
-        for future in as_completed(futures):
-            try:
-                result = future.result(timeout=2.5)
-                if result and len(result) > 5:
-                    results.append(result)
-            except:
-                pass
-    
-    if results:
-        return results[0][:400]
-    
-    return generate_fallback_response(user_text)
-
-# ============================================================
-# HTML
-# ============================================================
-INDEX_HTML = '''
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>AWESOME AI 2026</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #0a0a0f 0%, #1a0a2e 50%, #0a0a1f 100%);
-            min-height: 100vh;
-            color: #fff;
-            display: flex;
-            justify-content: center;
-            align-items: center;
+        /* ===== RESET & BASE ===== */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        .container { text-align: center; padding: 40px; max-width: 700px; }
-        .logo { font-size: 80px; margin-bottom: 10px; animation: float 3s ease-in-out infinite; }
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-15px); }
+        :root {
+            --bg-primary: #0d0d12;
+            --bg-secondary: #16161e;
+            --bg-chat: #1c1c26;
+            --bg-input: #252530;
+            --bg-hover: #2d2d3a;
+            --text-primary: #ececf1;
+            --text-secondary: #a1a1aa;
+            --text-muted: #6b6b7a;
+            --accent: #7c5cfc;
+            --accent-glow: rgba(124, 92, 252, 0.2);
+            --border: #2a2a36;
+            --radius: 12px;
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            --transition: all 0.2s ease;
         }
-        h1 {
-            font-size: 48px;
-            background: linear-gradient(90deg, #ff6b6b, #ffd93d, #6bcb77, #4d96ff);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 15px;
+        html, body {
+            height: 100%;
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+            user-select: none;
         }
-        .subtitle { font-size: 18px; color: #aaa; margin-bottom: 30px; }
-        .features {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-            gap: 15px;
-            margin: 30px 0;
-        }
-        .feature {
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
-            padding: 15px;
-            border: 1px solid rgba(255,255,255,0.08);
-            transition: 0.3s;
-        }
-        .feature:hover {
-            background: rgba(255,255,255,0.1);
-            transform: translateY(-3px);
-            border-color: rgba(77, 150, 255, 0.3);
-        }
-        .feature .icon { font-size: 32px; }
-        .feature .label { font-size: 13px; margin-top: 5px; color: #ccc; }
-        .btn {
-            display: inline-block;
-            padding: 16px 48px;
-            font-size: 18px;
-            background: linear-gradient(90deg, #6b46c1, #4d96ff);
-            color: #fff;
-            border: none;
-            border-radius: 30px;
-            cursor: pointer;
-            text-decoration: none;
-            transition: 0.3s;
-            font-weight: 600;
-        }
-        .btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 0 40px rgba(77, 150, 255, 0.3);
-        }
-        .status { margin-top: 20px; color: #6bcb77; font-size: 14px; }
-        .status .dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            background: #6bcb77;
-            border-radius: 50%;
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
-        }
-        .footer { margin-top: 40px; color: #555; font-size: 13px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="logo">🧠</div>
-        <h1>AWESOME AI 2026</h1>
-        <p class="subtitle">Самый мощный ИИ-ассистент нового поколения</p>
-        <div class="features">
-            <div class="feature"><div class="icon">🔍</div><div class="label">Поиск</div></div>
-            <div class="feature"><div class="icon">🧮</div><div class="label">Математика</div></div>
-            <div class="feature"><div class="icon">🌤</div><div class="label">Погода</div></div>
-            <div class="feature"><div class="icon">💵</div><div class="label">Курсы</div></div>
-            <div class="feature"><div class="icon">🎨</div><div class="label">Генерация</div></div>
-            <div class="feature"><div class="icon">💎</div><div class="label">Premium</div></div>
-        </div>
-        <a href="/chat" class="btn">🚀 Начать общение</a>
-        <div class="status"><span class="dot"></span>Бот онлайн</div>
-        <div class="footer">AWESOME AI 2026 &copy;</div>
-    </div>
-</body>
-</html>
-'''
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 10px; }
 
-CHAT_HTML = '''
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AWESOME AI - Чат</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', sans-serif;
-            background: #0a0a0f;
-            color: #fff;
+        /* ===== APP LAYOUT ===== */
+        #app {
+            display: flex;
             height: 100vh;
+            width: 100vw;
+            background: var(--bg-primary);
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* ===== SIDEBAR (DeepSeek style) ===== */
+        #sidebar {
+            width: 260px;
+            min-width: 260px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
+            padding: 14px 12px;
+            height: 100vh;
+            overflow-y: auto;
+            flex-shrink: 0;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 100;
         }
-        .header {
-            padding: 15px 20px;
-            background: rgba(255,255,255,0.03);
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+        #sidebar .logo {
             display: flex;
             align-items: center;
-            gap: 12px;
-            flex-shrink: 0;
+            gap: 10px;
+            padding: 6px 4px 18px 4px;
+            font-weight: 700;
+            font-size: 17px;
+            letter-spacing: -0.3px;
+            color: var(--text-primary);
         }
-        .header .logo { font-size: 28px; }
-        .header h2 {
-            font-size: 18px;
+        #sidebar .logo .badge {
+            background: var(--accent);
+            color: #fff;
+            font-size: 9px;
             font-weight: 600;
-            background: linear-gradient(90deg, #ff6b6b, #ffd93d);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            padding: 2px 10px;
+            border-radius: 20px;
+            letter-spacing: 0.3px;
+            text-transform: uppercase;
+            box-shadow: 0 0 20px var(--accent-glow);
         }
-        .header .status { margin-left: auto; font-size: 12px; color: #6bcb77; }
-        .header .status .dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #6bcb77;
-            border-radius: 50%;
-            margin-right: 5px;
-            animation: pulse 2s infinite;
+        .new-chat-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius);
+            padding: 11px 16px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            width: 100%;
+            margin-bottom: 14px;
+            box-shadow: 0 0 24px var(--accent-glow);
         }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.3; }
+        .new-chat-btn:hover {
+            transform: scale(1.02);
+            box-shadow: 0 0 36px var(--accent-glow);
         }
-        .header .back-btn { color: #888; text-decoration: none; font-size: 14px; transition: 0.3s; }
-        .header .back-btn:hover { color: #fff; }
-        .messages {
+        .new-chat-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+        .history-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 8px 6px 6px 6px;
+        }
+        .history-list {
             flex: 1;
             overflow-y: auto;
-            padding: 20px;
+            margin-top: 4px;
+        }
+        .history-item {
+            padding: 9px 12px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: var(--transition);
+            color: var(--text-secondary);
+            font-size: 13.5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 2px;
+        }
+        .history-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .history-item.active { background: var(--bg-hover); color: var(--text-primary); }
+        .history-item .icon { opacity: 0.5; font-size: 14px; flex-shrink: 0; }
+        .sidebar-footer {
+            border-top: 1px solid var(--border);
+            padding-top: 12px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-muted);
             display: flex;
             flex-direction: column;
-            gap: 12px;
+            gap: 6px;
         }
-        .messages .msg {
-            max-width: 75%;
-            padding: 12px 18px;
-            border-radius: 16px;
-            animation: fadeIn 0.3s ease;
-            word-wrap: break-word;
-            line-height: 1.6;
-        }
-        .messages .msg.user {
-            align-self: flex-end;
-            background: linear-gradient(135deg, #4d96ff, #6b46c1);
-            border-bottom-right-radius: 4px;
-        }
-        .messages .msg.bot {
-            align-self: flex-start;
-            background: rgba(255,255,255,0.07);
-            border-bottom-left-radius: 4px;
-        }
-        .messages .msg .time {
-            font-size: 10px;
-            opacity: 0.5;
-            margin-top: 5px;
-            display: block;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .typing {
-            align-self: flex-start;
-            padding: 10px 16px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 16px;
-            font-size: 14px;
-            color: #888;
-            display: none;
-        }
-        .typing .dots::after { content: '...'; animation: dots 1.5s infinite; }
-        @keyframes dots {
-            0%, 20% { content: '.'; }
-            40%, 60% { content: '..'; }
-            80%, 100% { content: '...'; }
-        }
-        .input-area {
-            padding: 15px 20px;
-            background: rgba(255,255,255,0.03);
-            border-top: 1px solid rgba(255,255,255,0.06);
+        .sidebar-footer .user-row {
             display: flex;
+            align-items: center;
             gap: 10px;
+            padding: 6px 8px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        .sidebar-footer .user-row:hover { background: var(--bg-hover); }
+        .sidebar-footer .avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 12px;
+            color: #fff;
             flex-shrink: 0;
         }
-        .input-area input {
+        .sidebar-footer .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #22c55e;
+            display: inline-block;
+            margin-left: auto;
+        }
+
+        /* ===== MAIN CHAT ===== */
+        #main {
             flex: 1;
-            padding: 12px 18px;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 25px;
-            background: rgba(255,255,255,0.05);
-            color: #fff;
-            font-size: 15px;
-            outline: none;
-            transition: 0.3s;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+            height: 100vh;
+            overflow: hidden;
+            position: relative;
         }
-        .input-area input:focus {
-            border-color: #4d96ff;
-            background: rgba(255,255,255,0.08);
+
+        /* ===== CHAT HEADER ===== */
+        #chat-header {
+            padding: 14px 24px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--bg-primary);
+            flex-shrink: 0;
+            min-height: 56px;
         }
-        .input-area input::placeholder { color: #666; }
-        .input-area button {
-            padding: 12px 28px;
-            border: none;
-            border-radius: 25px;
-            background: linear-gradient(90deg, #4d96ff, #6b46c1);
-            color: #fff;
-            font-size: 15px;
+        #chat-header .title {
             font-weight: 600;
-            cursor: pointer;
-            transition: 0.3s;
-            white-space: nowrap;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        .input-area button:hover {
-            transform: scale(1.03);
-            box-shadow: 0 0 25px rgba(77, 150, 255, 0.3);
-        }
-        .input-area button:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none !important;
-        }
-        .input-area .clear-btn {
-            background: rgba(255,50,50,0.15);
-            padding: 12px 16px;
-            font-size: 18px;
-        }
-        .input-area .clear-btn:hover {
-            background: rgba(255,50,50,0.3);
-            box-shadow: none;
-        }
-        .user-info {
+        #chat-header .title .status {
             font-size: 11px;
-            color: #444;
-            padding: 5px 20px;
-            text-align: right;
-            border-top: 1px solid rgba(255,255,255,0.03);
+            font-weight: 400;
+            color: var(--text-muted);
         }
-        @media (max-width: 600px) {
-            .messages .msg { max-width: 90%; font-size: 14px; }
-            .input-area input { font-size: 14px; }
-            .input-area button { padding: 10px 16px; font-size: 13px; }
-            .header h2 { font-size: 15px; }
+        #chat-header .title .status.online { color: #22c55e; }
+        .header-actions {
+            display: flex;
+            gap: 6px;
         }
-        .messages::-webkit-scrollbar { width: 4px; }
-        .messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+        .header-actions button {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 6px 10px;
+            border-radius: 8px;
+            transition: var(--transition);
+            font-size: 13px;
+        }
+        .header-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+        /* ===== MESSAGES ===== */
+        #messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px 12px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            scroll-behavior: smooth;
+        }
+        .msg {
+            display: flex;
+            gap: 12px;
+            padding: 10px 14px;
+            border-radius: var(--radius);
+            max-width: 85%;
+            animation: msgIn 0.25s ease;
+            line-height: 1.6;
+            font-size: 14.5px;
+        }
+        @keyframes msgIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .msg.user {
+            align-self: flex-end;
+            background: var(--accent);
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .msg.bot {
+            align-self: flex-start;
+            background: var(--bg-chat);
+            color: var(--text-primary);
+            border-bottom-left-radius: 4px;
+        }
+        .msg .avatar {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            background: var(--bg-hover);
+        }
+        .msg.user .avatar { background: var(--accent); color: #fff; }
+        .msg .content { word-break: break-word; white-space: pre-wrap; }
+        .msg .content .time {
+            font-size: 10px;
+            opacity: 0.5;
+            margin-left: 10px;
+            font-weight: 400;
+        }
+        .msg .content a { color: #8b7cfc; text-decoration: none; }
+        .msg .content a:hover { text-decoration: underline; }
+        .msg .content code {
+            background: rgba(255,255,255,0.08);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .msg .content pre {
+            background: rgba(0,0,0,0.3);
+            padding: 10px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 13px;
+            margin: 4px 0;
+        }
+        .typing-indicator {
+            display: none;
+            align-self: flex-start;
+            padding: 10px 16px;
+            background: var(--bg-chat);
+            border-radius: var(--radius);
+            border-bottom-left-radius: 4px;
+            gap: 4px;
+            margin-top: 4px;
+        }
+        .typing-indicator span {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            animation: typing 1.2s infinite;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
+            30% { transform: translateY(-6px); opacity: 1; }
+        }
+
+        /* ===== INPUT ===== */
+        #input-area {
+            padding: 12px 24px 20px 24px;
+            border-top: 1px solid var(--border);
+            background: var(--bg-primary);
+            flex-shrink: 0;
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+        #input-area textarea {
+            flex: 1;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            transition: var(--transition);
+            min-height: 44px;
+            max-height: 160px;
+            line-height: 1.5;
+        }
+        #input-area textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+        #input-area textarea::placeholder { color: var(--text-muted); }
+        #input-area .send-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius);
+            padding: 10px 16px;
+            cursor: pointer;
+            transition: var(--transition);
+            font-size: 16px;
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px var(--accent-glow);
+        }
+        #input-area .send-btn:hover { transform: scale(1.04); box-shadow: 0 0 30px var(--accent-glow); }
+        #input-area .send-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        /* ===== MOBILE SIDEBAR TOGGLE ===== */
+        #sidebar-toggle {
+            display: none;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 22px;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
+        #sidebar-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 99;
+            backdrop-filter: blur(4px);
+        }
+
+        /* ===== RESPONSIVE ===== */
+        @media (max-width: 768px) {
+            #sidebar {
+                position: fixed;
+                top: 0;
+                left: 0;
+                height: 100vh;
+                transform: translateX(-100%);
+                width: 280px;
+                z-index: 101;
+                border-right: 1px solid var(--border);
+                box-shadow: 4px 0 40px rgba(0,0,0,0.5);
+            }
+            #sidebar.open { transform: translateX(0); }
+            #sidebar-overlay.active { display: block; }
+            #sidebar-toggle { display: block; }
+            #chat-header .title { font-size: 14px; }
+            #messages { padding: 14px 16px 8px 16px; }
+            #input-area { padding: 10px 16px 16px 16px; }
+            .msg { max-width: 92%; font-size: 14px; padding: 8px 12px; }
+        }
+        @media (max-width: 480px) {
+            #chat-header { padding: 10px 12px; }
+            #messages { padding: 10px 10px 6px 10px; }
+            #input-area { padding: 8px 10px 12px 10px; gap: 6px; }
+            #input-area textarea { font-size: 13px; padding: 8px 10px; min-height: 36px; }
+            .msg { max-width: 95%; font-size: 13px; padding: 6px 10px; }
+            .msg .avatar { width: 22px; height: 22px; font-size: 11px; }
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        <span class="logo">🧠</span>
-        <a href="/" class="back-btn">← Назад</a>
-        <h2>AWESOME AI</h2>
-        <div class="status"><span class="dot"></span>online</div>
-    </div>
-    <div class="messages" id="messages">
-        <div class="msg bot">
-            👋 Привет! Я AWESOME AI 2026.<br>Задай любой вопрос!
-            <span class="time">только что</span>
+
+<div id="app">
+    <!-- SIDEBAR OVERLAY (mobile) -->
+    <div id="sidebar-overlay"></div>
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar">
+        <div class="logo">
+            <span>🧠</span> AWESOME AI <span class="badge">2026</span>
         </div>
-        <div class="typing" id="typing"><span class="dots">печатает</span></div>
-    </div>
-    <div class="input-area">
-        <input type="text" id="input" placeholder="Спроси..." autofocus>
-        <button id="sendBtn">Отправить</button>
-        <button class="clear-btn" id="clearBtn">🗑</button>
-    </div>
-    <div class="user-info" id="userInfo">🔑 ID: гостевой</div>
-    <script>
-        let userId = localStorage.getItem('awesome_user_id');
-        if (!userId) { userId = Date.now() % 10000000; localStorage.setItem('awesome_user_id', userId); }
-        document.getElementById('userInfo').textContent = '🔑 ID: ' + userId;
-        const messages = document.getElementById('messages');
-        const input = document.getElementById('input');
-        const sendBtn = document.getElementById('sendBtn');
-        const clearBtn = document.getElementById('clearBtn');
-        const typing = document.getElementById('typing');
-        function addMessage(text, sender) {
-            const div = document.createElement('div');
-            div.className = 'msg ' + sender;
-            div.innerHTML = text.replace(/\\n/g, '<br>');
-            const time = document.createElement('span');
-            time.className = 'time';
-            time.textContent = new Date().toLocaleTimeString('ru-RU');
-            div.appendChild(time);
-            messages.insertBefore(div, typing);
-            messages.scrollTop = messages.scrollHeight;
+        <button class="new-chat-btn" onclick="newChat()">
+            <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            Новый чат
+        </button>
+        <div class="history-label">История</div>
+        <div class="history-list" id="historyList">
+            <!-- динамически -->
+        </div>
+        <div class="sidebar-footer">
+            <div class="user-row" id="userRow">
+                <div class="avatar" id="userAvatar">👤</div>
+                <span id="userName">Гость</span>
+                <span class="status-dot"></span>
+            </div>
+            <div style="display:flex;gap:10px;padding:4px 8px;font-size:12px;color:var(--text-muted);">
+                <span id="userStatus">🔓 Бесплатный</span>
+                <span id="userLimit">20/день</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main id="main">
+        <!-- HEADER -->
+        <header id="chat-header">
+            <div style="display:flex;align-items:center;gap:8px;">
+                <button id="sidebar-toggle" onclick="toggleSidebar()">☰</button>
+                <div class="title">
+                    AWESOME AI
+                    <span class="status online">● Онлайн</span>
+                </div>
+            </div>
+            <div class="header-actions">
+                <button onclick="newChat()" title="Новый чат">✦</button>
+                <button onclick="clearChat()" title="Очистить">🗑</button>
+            </div>
+        </header>
+
+        <!-- MESSAGES -->
+        <div id="messages">
+            <div class="msg bot">
+                <div class="avatar">🧠</div>
+                <div class="content">
+                    Привет! Я <b>AWESOME AI 2026</b> на базе GigaChat.<br>
+                    Задай любой вопрос — я отвечу за 2-3 секунды! 🚀
+                    <span class="time">now</span>
+                </div>
+            </div>
+            <div class="typing-indicator" id="typingIndicator">
+                <span></span><span></span><span></span>
+            </div>
+        </div>
+
+        <!-- INPUT -->
+        <div id="input-area">
+            <textarea id="userInput" rows="1" placeholder="Спроси у AWESOME AI..." onkeydown="handleKey(event)"></textarea>
+            <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
+        </div>
+    </main>
+</div>
+
+<script>
+    // ============================================================
+    // CONFIG
+    // ============================================================
+    const CONFIG = {
+        SUPABASE_URL: 'https://your-project.supabase.co',  // ЗАМЕНИТЕ
+        SUPABASE_ANON_KEY: 'your-anon-key',               // ЗАМЕНИТЕ
+        API_URL: window.location.origin + '/api/chat',   // ваш бэкенд
+        USER_ID: Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        USER_NAME: 'Гость',
+    };
+
+    // ============================================================
+    // STATE
+    // ============================================================
+    let chatHistory = [];
+    let currentChatId = null;
+    let isSending = false;
+    let messageIdCounter = 0;
+
+    // ============================================================
+    // DOM REFS
+    // ============================================================
+    const messagesEl = document.getElementById('messages');
+    const userInput = document.getElementById('userInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const typingIndicator = document.getElementById('typingIndicator');
+    const historyList = document.getElementById('historyList');
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+
+    // ============================================================
+    // SUPABASE CLIENT
+    // ============================================================
+    let supabase = null;
+    try {
+        if (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_URL.includes('your-project')) {
+            console.warn('⚠️ Настройте SUPABASE_URL и SUPABASE_ANON_KEY');
+        } else {
+            // Инициализация Supabase через CDN
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js';
+            script.onload = () => {
+                const { createClient } = supabaseJs;
+                supabase = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+                console.log('✅ Supabase подключен');
+                loadUserData();
+                loadHistory();
+            };
+            document.head.appendChild(script);
         }
-        function showTyping() { typing.style.display = 'block'; messages.scrollTop = messages.scrollHeight; }
-        function hideTyping() { typing.style.display = 'none'; }
-        async function sendMessage() {
-            const text = input.value.trim();
-            if (!text) return;
-            input.value = '';
-            sendBtn.disabled = true;
-            addMessage(text, 'user');
-            showTyping();
+    } catch(e) {
+        console.warn('⚠️ Supabase не подключен:', e);
+    }
+
+    // ============================================================
+    // USER DATA (local fallback)
+    // ============================================================
+    function loadUserData() {
+        const saved = localStorage.getItem('awesome_user');
+        if (saved) {
             try {
-                const response = await fetch('/api/message', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text, user_id: parseInt(userId), username: 'web_user' })
-                });
-                hideTyping();
-                const data = await response.json();
-                if (response.status === 429) addMessage('🔴 ' + data.error, 'bot');
-                else if (data.error) addMessage('❌ ' + data.error, 'bot');
-                else addMessage(data.response, 'bot');
-            } catch (err) {
-                hideTyping();
-                addMessage('❌ Ошибка соединения', 'bot');
-            }
-            sendBtn.disabled = false;
-            input.focus();
+                const data = JSON.parse(saved);
+                CONFIG.USER_NAME = data.username || 'Гость';
+                document.getElementById('userName').textContent = CONFIG.USER_NAME;
+                document.getElementById('userAvatar').textContent = CONFIG.USER_NAME[0].toUpperCase() || '👤';
+                document.getElementById('userStatus').textContent = data.premium ? '💎 Premium' : '🔓 Бесплатный';
+                document.getElementById('userLimit').textContent = data.premium ? '♾️' : `${data.remaining || 20}/день`;
+                return;
+            } catch(e) {}
         }
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
-        sendBtn.addEventListener('click', sendMessage);
-        clearBtn.addEventListener('click', () => {
-            document.querySelectorAll('.msg').forEach(m => m.remove());
-            addMessage('🧹 Очищено', 'bot');
+        // Запрашиваем имя
+        const name = prompt('Как вас зовут?', 'Гость') || 'Гость';
+        CONFIG.USER_NAME = name;
+        document.getElementById('userName').textContent = name;
+        document.getElementById('userAvatar').textContent = name[0].toUpperCase() || '👤';
+        localStorage.setItem('awesome_user', JSON.stringify({
+            username: name,
+            premium: false,
+            remaining: 20
+        }));
+        if (supabase) {
+            supabase.from('users_web').upsert({
+                user_id: CONFIG.USER_ID,
+                username: name,
+                joined_at: new Date().toISOString()
+            }).then();
+        }
+    }
+
+    // ============================================================
+    // HISTORY
+    // ============================================================
+    function loadHistory() {
+        const saved = localStorage.getItem('awesome_history');
+        if (saved) {
+            try {
+                const data = JSON.parse(saved);
+                chatHistory = data;
+                renderHistory();
+                if (chatHistory.length > 0) {
+                    const last = chatHistory[chatHistory.length - 1];
+                    currentChatId = last.id;
+                    renderMessages(last.messages);
+                }
+                return;
+            } catch(e) {}
+        }
+        // Загружаем из Supabase
+        if (supabase) {
+            supabase.from('chat_history_web')
+                .select('*')
+                .eq('user_id', CONFIG.USER_ID)
+                .order('created_at', { ascending: false })
+                .limit(20)
+                .then(({ data, error }) => {
+                    if (data && data.length > 0) {
+                        chatHistory = data.map(row => ({
+                            id: row.id,
+                            title: row.title || 'Чат',
+                            messages: row.messages || [],
+                            created_at: row.created_at
+                        }));
+                        localStorage.setItem('awesome_history', JSON.stringify(chatHistory));
+                        renderHistory();
+                        if (chatHistory.length > 0) {
+                            const last = chatHistory[chatHistory.length - 1];
+                            currentChatId = last.id;
+                            renderMessages(last.messages);
+                        }
+                    }
+                });
+        }
+    }
+
+    function saveHistory() {
+        localStorage.setItem('awesome_history', JSON.stringify(chatHistory));
+        if (supabase) {
+            const chat = chatHistory.find(c => c.id === currentChatId);
+            if (chat) {
+                supabase.from('chat_history_web').upsert({
+                    id: chat.id,
+                    user_id: CONFIG.USER_ID,
+                    title: chat.title || 'Чат',
+                    messages: chat.messages,
+                    updated_at: new Date().toISOString()
+                }).then();
+            }
+        }
+    }
+
+    function renderHistory() {
+        historyList.innerHTML = '';
+        if (chatHistory.length === 0) {
+            historyList.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:13px;text-align:center;">Нет чатов</div>';
+            return;
+        }
+        chatHistory.slice().reverse().forEach(chat => {
+            const div = document.createElement('div');
+            div.className = 'history-item' + (chat.id === currentChatId ? ' active' : '');
+            div.innerHTML = `<span class="icon">💬</span> ${chat.title || 'Чат'}`;
+            div.onclick = () => switchChat(chat.id);
+            historyList.appendChild(div);
         });
-        fetch('/api/status').then(r => r.json()).then(d => console.log('✅ Online', d)).catch(e => console.error(e));
-    </script>
+    }
+
+    function switchChat(chatId) {
+        currentChatId = chatId;
+        const chat = chatHistory.find(c => c.id === chatId);
+        if (chat) {
+            renderMessages(chat.messages);
+            renderHistory();
+        }
+        closeSidebar();
+    }
+
+    function newChat() {
+        const id = 'chat_' + Date.now();
+        const newChat = {
+            id: id,
+            title: 'Новый чат',
+            messages: [
+                { role: 'bot', content: 'Привет! Чем могу помочь? 🧠', time: new Date().toISOString() }
+            ],
+            created_at: new Date().toISOString()
+        };
+        chatHistory.push(newChat);
+        currentChatId = id;
+        renderMessages(newChat.messages);
+        renderHistory();
+        saveHistory();
+        closeSidebar();
+        userInput.focus();
+    }
+
+    function clearChat() {
+        if (!currentChatId) return;
+        const chat = chatHistory.find(c => c.id === currentChatId);
+        if (chat) {
+            chat.messages = [
+                { role: 'bot', content: 'Чат очищен. Задай новый вопрос! 🧠', time: new Date().toISOString() }
+            ];
+            renderMessages(chat.messages);
+            saveHistory();
+        }
+    }
+
+    // ============================================================
+    // RENDER MESSAGES
+    // ============================================================
+    function renderMessages(messages) {
+        messagesEl.innerHTML = '';
+        messages.forEach(msg => {
+            addMessageToDOM(msg.role, msg.content, msg.time, false);
+        });
+        scrollToBottom();
+    }
+
+    function addMessageToDOM(role, content, time, animate = true) {
+        const div = document.createElement('div');
+        div.className = `msg ${role}`;
+        if (animate) div.style.animation = 'none';
+        const avatar = role === 'user' ? CONFIG.USER_NAME[0].toUpperCase() || '👤' : '🧠';
+        const timeStr = time ? new Date(time).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : 'now';
+        div.innerHTML = `
+            <div class="avatar">${avatar}</div>
+            <div class="content">
+                ${formatContent(content)}
+                <span class="time">${timeStr}</span>
+            </div>
+        `;
+        messagesEl.insertBefore(div, typingIndicator);
+        if (animate) {
+            requestAnimationFrame(() => {
+                div.style.animation = '';
+            });
+        }
+        scrollToBottom();
+    }
+
+    function formatContent(text) {
+        // Простое форматирование
+        text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+        text = text.replace(/\*(.+?)\*/g, '<i>$1</i>');
+        text = text.replace(/`(.+?)`/g, '<code>$1</code>');
+        text = text.replace(/\n/g, '<br>');
+        // Ссылки
+        text = text.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
+        return text;
+    }
+
+    function scrollToBottom() {
+        requestAnimationFrame(() => {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        });
+    }
+
+    // ============================================================
+    // SEND MESSAGE
+    // ============================================================
+    async function sendMessage() {
+        const text = userInput.value.trim();
+        if (!text || isSending) return;
+
+        isSending = true;
+        sendBtn.disabled = true;
+        userInput.disabled = true;
+
+        // Добавляем сообщение пользователя
+        const userMsg = { role: 'user', content: text, time: new Date().toISOString() };
+        addMessageToDOM('user', text, userMsg.time);
+        userInput.value = '';
+        userInput.style.height = 'auto';
+
+        // Показываем индикатор печати
+        typingIndicator.style.display = 'flex';
+
+        // Сохраняем в историю
+        let chat = chatHistory.find(c => c.id === currentChatId);
+        if (!chat) {
+            newChat();
+            chat = chatHistory.find(c => c.id === currentChatId);
+        }
+        if (chat) {
+            chat.messages.push(userMsg);
+            if (chat.messages.length === 2 && chat.messages[0].role === 'bot') {
+                chat.title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+            }
+            saveHistory();
+            renderHistory();
+        }
+
+        try {
+            // Отправляем запрос к бэкенду
+            const response = await fetch(CONFIG.API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    user_id: CONFIG.USER_ID,
+                    text: text,
+                    chat_id: currentChatId
+                })
+            });
+
+            typingIndicator.style.display = 'none';
+
+            if (response.ok) {
+                const data = await response.json();
+                const botMsg = {
+                    role: 'bot',
+                    content: data.response || '❌ Не удалось получить ответ',
+                    time: new Date().toISOString()
+                };
+                addMessageToDOM('bot', botMsg.content, botMsg.time);
+                if (chat) {
+                    chat.messages.push(botMsg);
+                    saveHistory();
+                    renderHistory();
+                }
+            } else {
+                const errorText = await response.text();
+                addMessageToDOM('bot', `⚠️ Ошибка сервера: ${errorText}`, new Date().toISOString());
+            }
+        } catch (e) {
+            typingIndicator.style.display = 'none';
+            addMessageToDOM('bot', `⚠️ Ошибка соединения: ${e.message}`, new Date().toISOString());
+        }
+
+        isSending = false;
+        sendBtn.disabled = false;
+        userInput.disabled = false;
+        userInput.focus();
+        scrollToBottom();
+    }
+
+    // ============================================================
+    // UI HELPERS
+    // ============================================================
+    function handleKey(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+        // Авто-высота
+        e.target.style.height = 'auto';
+        e.target.style.height = Math.min(e.target.scrollHeight, 160) + 'px';
+    }
+
+    function toggleSidebar() {
+        sidebar.classList.toggle('open');
+        overlay.classList.toggle('active');
+    }
+
+    function closeSidebar() {
+        sidebar.classList.remove('open');
+        overlay.classList.remove('active');
+    }
+
+    // ============================================================
+    // INIT
+    // ============================================================
+    // Если нет чатов — создаём стартовый
+    if (chatHistory.length === 0) {
+        newChat();
+    }
+
+    // Авто-фокус
+    userInput.focus();
+
+    // Клик по оверлею закрывает сайдбар
+    overlay.addEventListener('click', closeSidebar);
+
+    console.log('🧠 AWESOME AI 2026 — веб-версия');
+    console.log('👤 Пользователь:', CONFIG.USER_NAME);
+    console.log('🆔 ID:', CONFIG.USER_ID);
+
+    // ============================================================
+    // ДЕМО-БЭКЕНД (если нет настоящего API)
+    // ============================================================
+    // Если API не настроен — используем локальную имитацию
+    if (CONFIG.API_URL.includes('localhost') || CONFIG.API_URL.includes('127.0.0.1')) {
+        console.warn('⚠️ Используется демо-бэкенд. Настройте API_URL для реальной работы.');
+        // Перехватываем fetch
+        const originalFetch = window.fetch;
+        window.fetch = function(url, options) {
+            if (url === CONFIG.API_URL) {
+                return new Promise((resolve) => {
+                    const body = JSON.parse(options.body);
+                    const text = body.text || '';
+                    // Имитация ответа
+                    const responses = [
+                        `🔍 Я нашёл информацию по запросу: "${text}"\n\n📚 Вот что мне известно по этой теме. GigaChat анализирует данные в реальном времени.`,
+                        `🧠 Отличный вопрос! "${text}" — это интересная тема. Давай разберём её подробнее...\n\n💡 Мой совет: всегда проверяй информацию из нескольких источников.`,
+                        `🚀 AWESOME AI на связи! По запросу "${text}" могу сказать следующее:\n\n• Это важно для понимания современных технологий.\n• Рекомендую изучить первоисточники.`,
+                        `✨ Привет! Я — AWESOME AI 2026. Ты спросил: "${text}".\n\nОтвечаю через GigaChat-Pro — самую мощную нейросеть в мире! 🔥`
+                    ];
+                    const response = responses[Math.floor(Math.random() * responses.length)];
+                    resolve({
+                        ok: true,
+                        json: () => Promise.resolve({ response: response })
+                    });
+                });
+            }
+            return originalFetch.call(this, url, options);
+        };
+    }
+</script>
+
 </body>
 </html>
-'''
-
-# ============================================================
-# FLASK РОУТЫ
-# ============================================================
-
-@app.route('/')
-def index():
-    return render_template_string(INDEX_HTML)
-
-@app.route('/chat')
-def chat():
-    return render_template_string(CHAT_HTML)
-
-@app.route('/api/message', methods=['POST'])
-def api_message():
-    try:
-        data = request.get_json()
-        if not data or 'message' not in data:
-            return jsonify({'error': 'Нет сообщения'}), 400
-        
-        user_text = data['message'].strip()
-        if not user_text:
-            return jsonify({'error': 'Пустое сообщение'}), 400
-        
-        user_id = data.get('user_id', int(time.time() * 1000) % 10000000)
-        username = data.get('username', 'web_user')
-        
-        ensure_user(user_id, username)
-        
-        if not can_send_message(user_id):
-            return jsonify({'error': '🔴 Лимит! Купи Premium.', 'limit_reached': True}), 429
-        
-        response = process_message(user_id, user_text)
-        increment_messages(user_id)
-        save_message_history(user_id, user_text, response)
-        
-        return jsonify({
-            'response': response,
-            'timestamp': get_moscow_time().isoformat(),
-            'user_id': user_id
-        })
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/status', methods=['GET'])
-def api_status():
-    return jsonify({
-        'status': 'online',
-        'time': get_moscow_time().isoformat(),
-        'date': get_current_date(),
-        'sources': ['Google', 'Wikipedia', 'YouTube', 'Новости'],
-        'ai': ['GigaChat', 'YandexGPT']
-    })
-
-@app.route('/api/user/<int:user_id>', methods=['GET'])
-def api_user(user_id):
-    user_data = get_db_user(user_id)
-    if not user_data:
-        return jsonify({'error': 'Пользователь не найден'}), 404
-    return jsonify({
-        'user_id': user_id,
-        'username': user_data.get('username', 'unknown'),
-        'premium': get_premium_status(user_id),
-        'premium_expires': get_premium_expires(user_id),
-        'messages_today': user_data.get('messages_today', 0),
-        'joined_at': user_data.get('joined_at'),
-        'is_admin': is_admin(user_id)
-    })
-
-@app.route('/api/stats', methods=['GET'])
-def api_stats():
-    try:
-        conn = sqlite3.connect('users.db')
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users')
-        total = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM users WHERE premium = 1')
-        premium = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM users WHERE is_admin = 1')
-        admin = c.fetchone()[0]
-        conn.close()
-        return jsonify({'total_users': total, 'premium_users': premium, 'admin_users': admin})
-    except:
-        return jsonify({'error': 'Ошибка'}), 500
-
-@app.route('/health')
-def health():
-    return jsonify({'status': 'healthy', 'timestamp': time.time()})
-
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({'error': 'Not found'}), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify({'error': 'Server error'}), 500
-
-# ============================================================
-# KEEP-ALIVE
-# ============================================================
-def keep_alive():
-    while True:
-        time.sleep(300)
-        try:
-            print("💓 Keep-alive пинг")
-        except:
-            pass
-
-keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
-keep_alive_thread.start()
-
-# ============================================================
-# ЗАПУСК
-# ============================================================
-init_db()
-init_memory_db()
-
-print("=" * 60)
-print("🧠 AWESOME AI 2026 — ВЕБ-САЙТ ЗАПУЩЕН!")
-print("=" * 60)
-print("🌐 ИСТОЧНИКИ:")
-print("✅ Google")
-print("✅ Wikipedia")
-print("✅ YouTube")
-print("✅ Telegram")
-print("✅ ВКонтакте")
-print("✅ Twitch")
-print("✅ Новости")
-print("✅ GigaChat (ОСНОВНОЙ)")
-print("✅ YandexGPT (БАЗА)")
-print("=" * 60)
-print("🚀 САЙТ ГОТОВ К РАБОТЕ!")
-print("=" * 60)
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    debug = os.getenv("DEBUG", "True").lower() == "true"
-    print(f"🌐 САЙТ: http://0.0.0.0:{port}")
-    print("=" * 60)
-    app.run(host='0.0.0.0', port=port, debug=debug)
