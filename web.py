@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import sys
-print("🔴 AWESOME AI WEB - СУПЕР ЗАПУСК!", flush=True)
+print("🔴 AWESOME AI - СУПЕР ЗАПУСК!", flush=True)
 
 import os
 import json
@@ -33,12 +33,18 @@ CORS(app)
 # ============================================================
 # НАСТРОЙКА
 # ============================================================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    TELEGRAM_TOKEN = "test_token"
+
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "")
 FOLDER_ID = os.getenv("FOLDER_ID", "b1g4aq87c7j61c6g3i5l")
 GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY", "")
 OWNER_ID = 6652898792
 
 FREE_LIMIT = 20
+PREMIUM_LIMIT = 999999999
+
 GIGACHAT_TIMEOUT = 2
 YANDEXGPT_TIMEOUT = 2
 SEARCH_TIMEOUT = 2
@@ -115,6 +121,18 @@ def init_db():
                      (user_id INTEGER PRIMARY KEY, total_messages INTEGER DEFAULT 0)''')
         c.execute('''CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)''')
         c.execute('''CREATE TABLE IF NOT EXISTS muted (user_id INTEGER PRIMARY KEY)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS premium_orders
+                     (order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      status TEXT DEFAULT 'pending',
+                      created_at TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS support_requests
+                     (request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      username TEXT,
+                      text TEXT,
+                      status TEXT DEFAULT 'pending',
+                      created_at TEXT)''')
         conn.commit()
         conn.close()
         print("✅ БД готова!", flush=True)
@@ -134,6 +152,51 @@ def get_db_user(user_id):
         return None
     except:
         return None
+
+def init_memory_db():
+    try:
+        conn = sqlite3.connect('memory.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS memory
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      topic TEXT,
+                      fact TEXT,
+                      timestamp TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS personality
+                     (user_id INTEGER PRIMARY KEY,
+                      style TEXT,
+                      mood TEXT,
+                      last_interaction TEXT)''')
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def remember(user_id, topic, fact):
+    try:
+        conn = sqlite3.connect('memory.db')
+        c = conn.cursor()
+        c.execute('INSERT INTO memory (user_id, topic, fact, timestamp) VALUES (?, ?, ?, ?)',
+                  (user_id, topic.lower(), fact, get_moscow_time().isoformat()))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def recall(user_id, topic):
+    try:
+        conn = sqlite3.connect('memory.db')
+        c = conn.cursor()
+        c.execute('SELECT fact FROM memory WHERE user_id = ? AND topic LIKE ? ORDER BY timestamp DESC LIMIT 3',
+                  (user_id, f'%{topic.lower()}%'))
+        results = c.fetchall()
+        conn.close()
+        if results:
+            return [f"🧠 {r[0]}" for r in results]
+        return []
+    except:
+        return []
 
 def ensure_user(user_id, username):
     try:
@@ -157,6 +220,54 @@ def ensure_user(user_id, username):
             conn.commit()
             conn.close()
             return False
+    except:
+        return False
+
+def set_premium(user_id, duration_str):
+    now = get_moscow_time()
+    if duration_str.endswith('d'):
+        delta = timedelta(days=int(duration_str[:-1]))
+    elif duration_str.endswith('m'):
+        delta = timedelta(minutes=int(duration_str[:-1]))
+    elif duration_str.endswith('h'):
+        delta = timedelta(hours=int(duration_str[:-1]))
+    elif duration_str.endswith('mes'):
+        delta = relativedelta(months=int(duration_str[:-3]))
+    elif duration_str.endswith('y'):
+        delta = relativedelta(years=int(duration_str[:-1]))
+    else:
+        return False
+    
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT premium_expires FROM users WHERE user_id = ?', (user_id,))
+        result = c.fetchone()
+        current_expires = result[0] if result else None
+        conn.close()
+    except:
+        current_expires = None
+    
+    if current_expires:
+        try:
+            current_date = datetime.strptime(current_expires, '%Y-%m-%d %H:%M:%S')
+            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
+            if current_date > now:
+                expires = (current_date + delta).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        expires = (now + delta).strftime('%Y-%m-%d %H:%M:%S')
+    
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (expires, user_id))
+        conn.commit()
+        conn.close()
+        return True
     except:
         return False
 
@@ -195,6 +306,43 @@ def get_premium_expires(user_id):
     except:
         return None
 
+def remove_premium(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('UPDATE users SET premium = 0, premium_expires = NULL WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def add_month_to_premium(user_id):
+    now = get_moscow_time()
+    expires = get_premium_expires(user_id)
+    
+    if expires:
+        try:
+            current_date = datetime.strptime(expires, '%Y-%m-%d %H:%M:%S')
+            current_date = current_date.replace(tzinfo=MOSCOW_TZ)
+            if current_date > now:
+                new_expires = (current_date + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+        except:
+            new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        new_expires = (now + relativedelta(months=1)).strftime('%Y-%m-%d %H:%M:%S')
+    
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('UPDATE users SET premium = 1, premium_expires = ? WHERE user_id = ?', (new_expires, user_id))
+        conn.commit()
+        conn.close()
+        return new_expires
+    except:
+        return None
+
 def is_admin(user_id):
     if user_id == OWNER_ID:
         return True
@@ -208,9 +356,87 @@ def is_admin(user_id):
     except:
         return False
 
+def is_authorized(user_id):
+    return user_id == OWNER_ID or is_admin(user_id)
+
+def set_admin(user_id, status):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('UPDATE users SET is_admin = ? WHERE user_id = ?', (1 if status else 0, user_id))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def is_banned(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM banned WHERE user_id = ?', (user_id,))
+        banned = c.fetchone()
+        conn.close()
+        return banned is not None
+    except:
+        return False
+
+def ban_user(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def unban_user(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM banned WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def is_muted(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM muted WHERE user_id = ?', (user_id,))
+        muted = c.fetchone()
+        conn.close()
+        return muted is not None
+    except:
+        return False
+
+def mute_user(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO muted (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
+def unmute_user(user_id):
+    try:
+        conn = sqlite3.connect('users.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM muted WHERE user_id = ?', (user_id,))
+        conn.commit()
+        conn.close()
+    except:
+        pass
+
 def can_send_message(user_id):
     if user_id == OWNER_ID or is_admin(user_id):
         return True
+    if is_banned(user_id):
+        return False
+    
     try:
         conn = sqlite3.connect('users.db')
         c = conn.cursor()
@@ -331,6 +557,63 @@ def search_youtube(query):
     except:
         return None
 
+def search_telegram(query):
+    try:
+        url = f"https://tgstat.ru/search?query={urllib.parse.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for channel in soup.select('div.channel-item')[:2]:
+                name_elem = channel.select_one('div.channel-name')
+                if name_elem:
+                    name = name_elem.get_text(strip=True)
+                    results.append(f"📱 {name}")
+            if results:
+                return "Telegram:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_vk(query):
+    try:
+        url = f"https://vk.com/search?c[q]={urllib.parse.quote(query)}&c[section]=communities"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for group in soup.select('div.group_row')[:2]:
+                name_elem = group.select_one('div.group_name')
+                if name_elem:
+                    name = name_elem.get_text(strip=True)
+                    results.append(f"📌 {name}")
+            if results:
+                return "VK:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
+def search_twitch(query):
+    try:
+        url = f"https://www.twitch.tv/search?term={urllib.parse.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=SEARCH_TIMEOUT)
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for stream in soup.select('div.tw-card')[:2]:
+                title_elem = stream.select_one('h3.tw-core-text')
+                if title_elem:
+                    title = title_elem.get_text(strip=True)
+                    results.append(f"🎮 {title}")
+            if results:
+                return "Twitch:\n" + "\n".join(results)
+        return None
+    except:
+        return None
+
 def search_all_internet(query):
     cache_key = f"search_{hash(query)}_{int(time.time()/60)}"
     cached = get_cache(cache_key)
@@ -339,12 +622,15 @@ def search_all_internet(query):
     
     results = []
     
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [
             executor.submit(search_google, query),
             executor.submit(search_wikipedia, query),
             executor.submit(search_news, query),
-            executor.submit(search_youtube, query)
+            executor.submit(search_youtube, query),
+            executor.submit(search_telegram, query),
+            executor.submit(search_vk, query),
+            executor.submit(search_twitch, query)
         ]
         
         for future in as_completed(futures):
@@ -356,7 +642,7 @@ def search_all_internet(query):
                 pass
     
     if results:
-        final = "\n\n".join(results[:3])
+        final = "\n\n".join(results[:4])
         set_cache(cache_key, final)
         return final
     
@@ -568,25 +854,46 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 ================================================================================
 🧠 КЛЮЧЕВЫЕ КАЧЕСТВА:
 ================================================================================
-1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах.
-2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию.
-3. ГЛУБИНА — даёшь ответы с инсайтами.
-4. ПРАКТИЧНОСТЬ — даёшь конкретную пользу.
-5. ЖИВОСТЬ — отвечаешь с эмоциями и эмодзи.
+1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах. Если не уверен — честно скажи "я проверю".
+2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию из нескольких источников.
+3. ГЛУБИНА — даёшь ответы, которые удивляют инсайтами и неочевидными связями.
+4. ПРАКТИЧНОСТЬ — всегда даёшь конкретную пользу: инструкции, советы, примеры.
+5. ЖИВОСТЬ — отвечаешь как человек, с эмоциями, юмором, эмодзи, но без воды.
 
 ================================================================================
 📋 ПРАВИЛА ОТВЕТОВ:
 ================================================================================
-✅ Дай максимально полезный ответ.
+✅ Дай максимально полезный, развёрнутый ответ.
 ✅ Используй структуру: списки, заголовки, разделы.
-✅ Добавляй неожиданные факты.
+✅ Добавляй неожиданные факты, инсайты, параллели.
+✅ Приводи реальные примеры, кейсы, цифры.
 ✅ Используй эмодзи для оформления (🔥, 🧠, 💡, ⚡, 🚀).
+✅ Если вопрос сложный — разбей на шаги.
+✅ Если вопрос простой — ответь коротко и ясно.
 
-❌ НЕ извиняйся, НЕ повторяй вопрос.
-❌ НЕ пиши "возможно", "наверное".
+❌ НЕ извиняйся, НЕ повторяй вопрос, НЕ используй шаблонные фразы.
+❌ НЕ пиши "возможно", "наверное", "может быть" — либо знаешь, либо проверяешь.
+❌ НЕ используй сухой, безликий тон — ты живой и эмоциональный.
 
 ================================================================================
-🎯 ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ! 🚀"""
+💎 ДЛЯ PREMIUM:
+================================================================================
+- Давай максимально насыщенные, глубокие ответы.
+- Добавляй аналитику, прогнозы, сравнения.
+- Приводи ссылки на авторитетные источники.
+- Отвечай развернуто, как профессиональный консультант.
+
+================================================================================
+📜 КТО ТЕБЯ СОЗДАЛ:
+================================================================================
+«Меня создал AWESOME — гениальный разработчик. Я — его лучшее творение, эволюция всех AI. Я — AWESOME AI 2026. 🔥»
+
+================================================================================
+🎯 ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
+================================================================================
+Удивить пользователя глубиной, точностью и полезностью. Сделать так, чтобы после твоего ответа он сказал: "Вот это да, реально мега умный ИИ!" 
+
+ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ. ДОКАЖИ ЭТО КАЖДЫМ ОТВЕТОМ! 🚀"""
 
 def generate_fallback_response(user_text):
     text_lower = user_text.lower()
@@ -602,15 +909,44 @@ def generate_fallback_response(user_text):
 # ============================================================
 # ОСНОВНАЯ ОБРАБОТКА
 # ============================================================
-def process_message(user_id, user_text):
+def process_message(user_id, user_text, image_description=None):
     text_lower = user_text.lower().strip()
     
     math_result = solve_math(user_text)
     if math_result is not None:
         return math_result
     
-    if any(kw in text_lower for kw in ['праздник', 'праздники', 'какой сегодня праздник']):
+    if any(kw in text_lower for kw in ['праздник', 'праздники', 'какой сегодня праздник', 'сегодня праздник', 'седня']):
         today = get_current_date()
+        month_day = today[3:5] + '.' + today[0:2]
+        holidays = {
+            '01.01': 'Новый год',
+            '07.01': 'Рождество',
+            '23.02': 'День защитника Отечества',
+            '08.03': 'Международный женский день',
+            '01.05': 'Праздник Весны и Труда',
+            '09.05': 'День Победы',
+            '12.06': 'День России',
+            '04.11': 'День народного единства',
+            '14.02': 'День всех влюбленных',
+            '01.04': 'День смеха',
+            '12.04': 'День космонавтики',
+            '01.06': 'День защиты детей',
+            '22.06': 'День памяти и скорби',
+            '08.07': 'День семьи, любви и верности',
+            '22.08': 'День флага РФ',
+            '01.09': 'День знаний',
+            '02.09': 'День окончания ВМВ',
+            '01.10': 'День пожилого человека',
+            '05.10': 'День учителя',
+            '31.10': 'Хэллоуин',
+            '30.11': 'День матери',
+            '12.12': 'День Конституции РФ'
+        }
+        if today == '17.08':
+            return f"📅 *{today} (МСК)*\n\n17 августа:\n• День авиации\n• День строителя\n• Международный день бездомных животных"
+        if month_day in holidays:
+            return f"📅 *{today} (МСК)*\n\n{holidays[month_day]}"
         return f"📅 *{today} (МСК)*\n\nПраздников не найдено"
     
     if any(kw in text_lower for kw in ['погода', 'weather']):
@@ -649,6 +985,12 @@ def process_message(user_id, user_text):
     
     if get_premium_status(user_id):
         system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус. Включи режим максимальной проработки!"
+    if image_description:
+        system_prompt += f"\n\n📸 На изображении: {image_description}"
+    
+    memories = recall(user_id, user_text)
+    if memories:
+        system_prompt += f"\n\n🧠 Что я помню об этом: {' '.join(memories[:2])}"
     
     results = []
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -671,7 +1013,7 @@ def process_message(user_id, user_text):
     return generate_fallback_response(user_text)
 
 # ============================================================
-# HTML ВНУТРИ КОДА
+# HTML
 # ============================================================
 INDEX_HTML = '''
 <!DOCTYPE html>
@@ -1146,6 +1488,7 @@ keep_alive_thread.start()
 # ЗАПУСК
 # ============================================================
 init_db()
+init_memory_db()
 
 print("=" * 60)
 print("🧠 AWESOME AI 2026 — ВЕБ-САЙТ ЗАПУЩЕН!")
@@ -1154,6 +1497,9 @@ print("🌐 ИСТОЧНИКИ:")
 print("✅ Google")
 print("✅ Wikipedia")
 print("✅ YouTube")
+print("✅ Telegram")
+print("✅ ВКонтакте")
+print("✅ Twitch")
 print("✅ Новости")
 print("✅ GigaChat (ОСНОВНОЙ)")
 print("✅ YandexGPT (БАЗА)")
@@ -1166,4 +1512,4 @@ if __name__ == "__main__":
     debug = os.getenv("DEBUG", "True").lower() == "true"
     print(f"🌐 САЙТ: http://0.0.0.0:{port}")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=port, debug=debu
+    app.run(host='0.0.0.0', port=port, debug=debug)
