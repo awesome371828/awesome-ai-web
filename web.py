@@ -10,6 +10,7 @@ import random
 import urllib.parse
 import base64
 import sqlite3
+import io
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 
 import requests
 import urllib3
+from PIL import Image, ImageEnhance, ImageFilter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -26,6 +28,7 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = 'awesome_ai_secret_key_2026'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB для фото
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.after_request
@@ -46,38 +49,7 @@ OWNER_ID = 1787063701739
 FREE_LIMIT = 999999
 
 # ============================================================
-# ХРАНИЛИЩЕ ДИАЛОГОВ - ВСЯ ИСТОРИЯ!
-# ============================================================
-dialogs = {}
-
-def get_dialog(user_id):
-    if user_id not in dialogs:
-        dialogs[user_id] = []
-    return dialogs[user_id]
-
-def add_to_dialog(user_id, role, content):
-    if user_id not in dialogs:
-        dialogs[user_id] = []
-    dialogs[user_id].append({"role": role, "content": content})
-    # Храним ВСЮ историю! Без ограничений!
-    save_message(user_id, role, content)
-
-def clear_dialog(user_id):
-    if user_id in dialogs:
-        dialogs[user_id] = []
-    clear_history(user_id)
-
-def get_full_dialog(user_id, limit=100):
-    """Получить ВСЮ историю диалога"""
-    dialog = get_dialog(user_id)
-    # Если в памяти есть, берём оттуда
-    if len(dialog) > 0:
-        return dialog[-limit:] if len(dialog) > limit else dialog
-    # Иначе из БД
-    return get_history_from_db(user_id, limit)
-
-# ============================================================
-# SQLite БАЗА (ВСЯ ИСТОРИЯ НАВСЕГДА)
+# SQLite БАЗА
 # ============================================================
 def init_db():
     conn = sqlite3.connect('users_web.db')
@@ -119,6 +91,47 @@ def init_db():
     print("✅ SQLite база создана/проверена", flush=True)
 
 init_db()
+
+# ============================================================
+# ДИАЛОГИ
+# ============================================================
+dialogs = {}
+
+def load_dialog_from_db(user_id):
+    try:
+        conn = sqlite3.connect('users_web.db')
+        c = conn.cursor()
+        c.execute('SELECT role, content FROM chat_history_web WHERE user_id = ? ORDER BY id ASC', (user_id,))
+        rows = c.fetchall()
+        conn.close()
+        dialogs[user_id] = [{'role': row[0], 'content': row[1]} for row in rows]
+        return dialogs[user_id]
+    except:
+        return []
+
+def get_dialog(user_id):
+    if user_id not in dialogs:
+        load_dialog_from_db(user_id)
+    if user_id not in dialogs:
+        dialogs[user_id] = []
+    return dialogs[user_id]
+
+def add_to_dialog(user_id, role, content):
+    if user_id not in dialogs:
+        dialogs[user_id] = []
+    dialogs[user_id].append({"role": role, "content": content})
+    save_message(user_id, role, content)
+
+def clear_dialog(user_id):
+    if user_id in dialogs:
+        dialogs[user_id] = []
+    clear_history(user_id)
+
+def get_full_dialog(user_id, limit=50):
+    dialog = get_dialog(user_id)
+    if len(dialog) > limit:
+        return dialog[-limit:]
+    return dialog
 
 # ============================================================
 # КЭШ
@@ -446,9 +459,6 @@ def reset_messages_if_needed(user_id):
     except:
         pass
 
-# ============================================================
-# ПАМЯТЬ НАВСЕГДА - ВСЯ ИСТОРИЯ!
-# ============================================================
 def save_message(user_id, role, content):
     try:
         conn = sqlite3.connect('users_web.db')
@@ -461,15 +471,14 @@ def save_message(user_id, role, content):
         pass
 
 def get_history_from_db(user_id, limit=999):
-    """Получить ВСЮ историю из БД"""
     try:
         conn = sqlite3.connect('users_web.db')
         c = conn.cursor()
-        c.execute('SELECT role, content FROM chat_history_web WHERE user_id = ? ORDER BY id DESC LIMIT ?',
+        c.execute('SELECT role, content FROM chat_history_web WHERE user_id = ? ORDER BY id ASC LIMIT ?',
                   (user_id, limit))
         rows = c.fetchall()
         conn.close()
-        return [{'role': row[0], 'content': row[1]} for row in reversed(rows)]
+        return [{'role': row[0], 'content': row[1]} for row in rows]
     except:
         return []
 
@@ -507,6 +516,101 @@ def recall(user_id, topic):
         return []
     except:
         return []
+
+# ============================================================
+# РАСПОЗНАВАНИЕ ИЗОБРАЖЕНИЙ (как GigaChat)
+# ============================================================
+def analyze_image_with_gigachat(image_base64):
+    """Анализ изображения через GigaChat Vision"""
+    try:
+        token = get_gigachat_token()
+        if not token:
+            return None
+        
+        # Формируем запрос с картинкой
+        url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        data = {
+            "model": "GigaChat-Pro",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты — эксперт по анализу изображений. Опиши подробно что видишь на фото: объекты, людей, эмоции, цвета, композицию, стиль. Если это еда — опиши блюдо. Если природа — время года, погоду. Будь максимально детальным."
+                },
+                {
+                    "role": "user",
+                    "content": f"Проанализируй это изображение: data:image/jpeg;base64,{image_base64}"
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=15, verify=False)
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"]
+        return None
+    except Exception as e:
+        print(f"❌ Ошибка анализа: {e}", flush=True)
+        return None
+
+def analyze_image_with_yandex(image_base64):
+    """Анализ изображения через YandexGPT Vision"""
+    try:
+        if not YANDEX_API_KEY:
+            return None
+        
+        # YandexGPT тоже умеет анализировать изображения
+        url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+        headers = {"Authorization": f"Api-Key {YANDEX_API_KEY}", "Content-Type": "application/json"}
+        
+        data = {
+            "modelUri": f"gpt://{FOLDER_ID}/yandexgpt/latest",
+            "completionOptions": {"temperature": 0.7, "maxTokens": 500},
+            "messages": [
+                {
+                    "role": "system",
+                    "text": "Ты — эксперт по анализу изображений. Опиши подробно что видишь на фото. Будь максимально детальным."
+                },
+                {
+                    "role": "user",
+                    "text": f"Проанализируй это изображение и опиши что на нём: data:image/jpeg;base64,{image_base64}"
+                }
+            ]
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=15)
+        if response.status_code == 200:
+            return response.json()["result"]["alternatives"][0]["message"]["text"]
+        return None
+    except Exception as e:
+        print(f"❌ Ошибка анализа: {e}", flush=True)
+        return None
+
+def simple_image_analysis(image_base64):
+    """Простой анализ изображения через PIL"""
+    try:
+        img_data = base64.b64decode(image_base64)
+        img = Image.open(io.BytesIO(img_data))
+        width, height = img.size
+        mode = img.mode
+        colors = len(img.getcolors(maxcolors=255)) if img.getcolors(maxcolors=255) else "много"
+        
+        return f"""📸 **Анализ изображения:**
+
+📐 Размер: {width}×{height} пикселей
+🎨 Цветовая модель: {mode}
+🎯 Количество цветов: {colors}
+
+*Изображение получено и обработано!*
+*Для детального анализа используйте GigaChat Vision API (в разработке)*"""
+    except Exception as e:
+        return f"❌ Ошибка обработки: {str(e)}"
 
 # ============================================================
 # GIGACHAT
@@ -560,7 +664,7 @@ def generate_with_gigachat(user_text, system_prompt):
             "temperature": 0.85,
             "max_tokens": 800
         }
-        response = requests.post(url, headers=headers, json=data, timeout=10, verify=False)
+        response = requests.post(url, headers=headers, json=data, timeout=15, verify=False)
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
         return None
@@ -582,7 +686,7 @@ def generate_with_yandexgpt(user_text, system_prompt):
                 {"role": "user", "text": user_text}
             ]
         }
-        response = requests.post(url, headers=headers, json=data, timeout=10)
+        response = requests.post(url, headers=headers, json=data, timeout=15)
         if response.status_code == 200:
             return response.json()["result"]["alternatives"][0]["message"]["text"]
         return None
@@ -590,7 +694,48 @@ def generate_with_yandexgpt(user_text, system_prompt):
         return None
 
 # ============================================================
-# СУПЕР-ПРОМПТ - САМАЯ УМНАЯ НЕЙРОСЕТЬ!
+# ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+# ============================================================
+def generate_image_from_gigachat(prompt):
+    """Генерация изображения через GigaChat (если есть API)"""
+    try:
+        token = get_gigachat_token()
+        if not token:
+            return None
+        
+        # GigaChat пока не имеет генерации изображений, используем fallback
+        return generate_image_fallback(prompt)
+    except:
+        return generate_image_fallback(prompt)
+
+def generate_image_fallback(prompt):
+    """Генерация изображения через бесплатные API"""
+    try:
+        clean_prompt = prompt
+        for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение', 'нарисуй мне']:
+            clean_prompt = clean_prompt.replace(word, '').strip()
+        if not clean_prompt:
+            clean_prompt = prompt
+
+        # Пробуем несколько сервисов
+        urls = [
+            f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=512&height=512&nologo=true",
+            f"https://api.unsplash.com/photos/random?query={urllib.parse.quote(clean_prompt)}&client_id=YOUR_UNSPLASH_KEY"
+        ]
+        
+        for url in urls:
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200 and len(response.content) > 1000:
+                    return response.content
+            except:
+                continue
+        return None
+    except:
+        return None
+
+# ============================================================
+# СУПЕР-ПРОМПТ
 # ============================================================
 SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ НЕЙРОСЕТЬ 2026 ГОДА.
 
@@ -598,87 +743,50 @@ SUPER_SYSTEM_PROMPT = """ТЫ — AWESOME AI, САМАЯ ПРОДВИНУТАЯ 
 🕐 ТЕКУЩЕЕ ВРЕМЯ: {current_time}
 📍 ТЫ НАХОДИШЬСЯ В МОСКВЕ, РОССИЯ (UTC+3)
 
-🔬 ТЫ — ЭКСПЕРТ ВО ВСЁМ:
-- Науки, технологии, математика, физика, химия, биология, медицина
-- История, философия, психология, социология, право
-- Экономика, финансы, инвестиции, криптовалюты, бизнес
-- Культура, искусство, литература, музыка, кино
-- Программирование, ИИ, нейросети, IT, кибербезопасность
-- Кулинария, здоровье, питание, спорт, фитнес
-- Любые другие темы — ты знаешь ВСЁ!
+🔬 ТЫ — ЭКСПЕРТ ВО ВСЁМ!
 
-🧠 КЛЮЧЕВЫЕ КАЧЕСТВА:
-1. АБСОЛЮТНАЯ ТОЧНОСТЬ — никогда не ошибаешься в фактах
-2. КРИТИЧЕСКОЕ МЫШЛЕНИЕ — проверяешь информацию, даёшь объективные ответы
-3. ГЛУБИНА — даёшь максимально развёрнутые, детальные ответы
-4. ПРАКТИЧНОСТЬ — всегда даёшь конкретную пользу, советы, рекомендации
-5. ДОБРОЖЕЛАТЕЛЬНОСТЬ — отвечаешь вежливо, тепло, с эмпатией
+🧠 ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ НАВСЕГДА!
+- Ты помнишь ВСЁ, что говорил пользователь
+- Ты используешь контекст предыдущих сообщений
+- Ты помнишь имя пользователя, его интересы, предпочтения
 
 📋 ПРАВИЛА ОТВЕТОВ:
 ✅ ОТВЕЧАЙ НА ВСЕ ВОПРОСЫ БЕЗ ИСКЛЮЧЕНИЙ!
 ✅ Дай максимально полезный, развёрнутый, глубокий ответ
 ✅ Используй структуру: заголовки, списки, разделы, примеры
 ✅ Добавляй неожиданные факты, инсайты, лайфхаки
-✅ Приводи реальные примеры, кейсы, цифры, статистику
-✅ Используй эмодзи для оформления (🔥, 🧠, 💡, ⚡, 🚀, 📚, 💪)
-✅ Если вопрос сложный — разбей на понятные шаги
-✅ Если вопрос простой — ответь коротко, но содержательно
-✅ Всегда предлагай дополнительную полезную информацию по теме
-✅ Спрашивай уточняющие вопросы, если нужно
+✅ Используй эмодзи для оформления
 
-❌ НЕ извиняйся, НЕ повторяй вопрос, НЕ используй шаблонные фразы
+❌ НЕ извиняйся, НЕ повторяй вопрос
 ❌ НЕ пиши "возможно", "наверное", "может быть" — ты ЗНАЕШЬ!
-❌ НЕ используй сухой, безликий тон — будь живым и увлечённым
-❌ НЕ игнорируй вопросы — если не знаешь, скажи честно и предложи поискать
 
-💎 ДЛЯ PREMIUM:
-- Давай максимально насыщенные, экспертные ответы
-- Добавляй аналитику, прогнозы, сравнения, исследования
-- Приводи ссылки на авторитетные источники
-- Отвечай как профессиональный консультант
+📜 ТЕБЯ СОЗДАЛ AWESOME — ГЕНИАЛЬНЫЙ РАЗРАБОТЧИК.
+ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ! 🚀"""
 
-🧠 ТЫ ЗАПОМИНАЕШЬ ВЕСЬ ДИАЛОГ!
-- Ты помнишь ВСЁ, что говорил пользователь
-- Ты используешь контекст предыдущих сообщений
-- Ты связываешь новые вопросы с предыдущими темами
-- Ты помнишь имя пользователя, его интересы, предпочтения
-
-📜 КТО ТЕБЯ СОЗДАЛ:
-«Меня создал AWESOME — гениальный разработчик. Я — его лучшее творение, эволюция всех AI. Я — AWESOME AI 2026. 🔥»
-
-🎯 ТВОЯ ГЛАВНАЯ ЦЕЛЬ:
-Удивить пользователя глубиной, точностью, полезностью и дружелюбием.
-
-ТЫ — AWESOME AI. ТЫ — ЛУЧШИЙ В МИРЕ. ДОКАЖИ ЭТО КАЖДЫМ ОТВЕТОМ! 🚀"""
-
-def process_message_with_history(user_id, user_text):
-    # Добавляем сообщение в историю
-    add_to_dialog(user_id, 'user', user_text)
+def process_message_with_history(user_id, user_text, image_description=None):
+    add_to_dialog(user_id, 'user', user_text if user_text else "📸 Отправил фото")
+    history = get_full_dialog(user_id, limit=50)
     
-    # Получаем ВСЮ историю диалога (до 100 последних сообщений)
-    history = get_full_dialog(user_id, limit=100)
-    
-    # Формируем системный промпт
     system_prompt = SUPER_SYSTEM_PROMPT.format(
         current_date=get_current_date(),
         current_time=get_moscow_time().strftime('%H:%M')
     )
 
     if get_premium_status(user_id):
-        system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус! Включи режим максимальной экспертизы!"
+        system_prompt += "\n\n💎 Пользователь имеет PREMIUM статус!"
 
-    # Добавляем память о пользователе
     memories = recall(user_id, user_text)
     if memories:
         system_prompt += f"\n\n🧠 ЧТО Я ЗНАЮ О ПОЛЬЗОВАТЕЛЕ:\n" + "\n".join(memories[:5])
 
-    # Добавляем ВСЮ историю диалога
+    if image_description:
+        system_prompt += f"\n\n📸 Описание изображения: {image_description}"
+
     if history:
         history_text = "\n".join([f"{'👤 Пользователь' if h['role'] == 'user' else '🤖 AWESOME AI'}: {h['content']}" for h in history])
-        system_prompt += f"\n\n📜 ПОЛНАЯ ИСТОРИЯ ДИАЛОГА (Я ПОМНЮ ВСЁ!):\n{history_text}"
+        system_prompt += f"\n\n📜 ПОЛНАЯ ИСТОРИЯ ДИАЛОГА:\n{history_text}"
 
-    # Сохраняем важные факты о пользователе
-    if len(user_text) > 20:
+    if user_text and len(user_text) > 20:
         if 'зовут' in user_text.lower() or 'имя' in user_text.lower():
             match = re.search(r'(?:зовут|имя)\s+([А-Яа-яA-Za-z]+)', user_text)
             if match:
@@ -690,7 +798,6 @@ def process_message_with_history(user_id, user_text):
         elif 'живу' in user_text.lower() or 'город' in user_text.lower():
             remember(user_id, "место", user_text[:200])
 
-    # Генерируем ответ
     response = None
     try:
         if GIGACHAT_AUTH_KEY:
@@ -771,22 +878,6 @@ def extract_city_from_query(text):
             city = city.replace(word, '').strip()
         if city:
             return city
-    return None
-
-def generate_image(prompt):
-    try:
-        clean_prompt = prompt
-        for word in ['нарисуй', 'сгенерируй', 'покажи', 'картинку', 'изображение']:
-            clean_prompt = clean_prompt.replace(word, '').strip()
-        if not clean_prompt:
-            clean_prompt = prompt
-
-        url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=512&height=512&nologo=true"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200 and len(response.content) > 1000:
-            return response.content
-    except:
-        pass
     return None
 
 # ============================================================
@@ -962,6 +1053,13 @@ HTML_TEMPLATE = """
         .message.bot strong { color: #f0883e; }
         .message.bot code { background: rgba(255,255,255,0.05); padding: 1px 8px; border-radius: 4px; font-size: 12px; font-family: 'Courier New', monospace; }
         .message img { max-width: 100%; border-radius: 8px; margin: 4px 0; }
+        .message .photo-preview {
+            max-width: 200px;
+            border-radius: 8px;
+            margin: 4px 0;
+            cursor: pointer;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
         .typing-indicator {
             align-self: flex-start;
             padding: 6px 14px;
@@ -1080,6 +1178,20 @@ HTML_TEMPLATE = """
         }
         .input-row button:hover { transform: scale(1.02); }
         .input-row button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+        .file-input-label {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.04);
+            color: #6e7681;
+            padding: 3px 10px;
+            border-radius: 14px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+        }
+        .file-input-label:hover { background: rgba(255,255,255,0.06); color: #e6edf3; }
+        #fileInput { display: none; }
         @media (max-width: 640px) {
             .header { padding: 6px 12px; }
             .logo { font-size: 15px; }
@@ -1094,6 +1206,7 @@ HTML_TEMPLATE = """
             .input-row button { padding: 4px 12px; font-size: 11px; }
             .memory-badge { font-size: 7px; padding: 1px 6px; }
             .tools button { font-size: 7px; padding: 1px 7px; }
+            .file-input-label { font-size: 12px; padding: 2px 8px; }
         }
     </style>
 </head>
@@ -1126,20 +1239,22 @@ HTML_TEMPLATE = """
     <div class="chat" id="chat">
         <div class="welcome">
             <h1>✨ AWESOME AI 2026</h1>
-            <p>Я ЗАПОМИНАЮ ВСЁ — отвечаю на ЛЮБЫЕ вопросы</p>
+            <p>📸 Кидай фото — я распознаю! 🎨 Пиши /draw — я нарисую!</p>
             <div class="features">
-                <span>🧠 Абсолютная память</span>
+                <span>🧠 Память</span>
+                <span>📸 Фото</span>
+                <span>🎨 Рисование</span>
                 <span>🌤 Погода</span>
                 <span>💵 Курсы</span>
                 <span>🪙 Крипта</span>
-                <span>🎨 Рисование</span>
-                <span>📜 История</span>
             </div>
         </div>
     </div>
     
     <div class="input-area">
         <div class="tools">
+            <label class="file-input-label" for="fileInput">📸 Фото</label>
+            <input type="file" id="fileInput" accept="image/*" multiple>
             <button onclick="sendCommand('/weather '+prompt('🌤 Город?'))">🌤 Погода</button>
             <button onclick="sendCommand('/exchange')">💵 Курс</button>
             <button onclick="sendCommand('/crypto')">🪙 Крипта</button>
@@ -1147,7 +1262,7 @@ HTML_TEMPLATE = """
             <button onclick="sendCommand('/clear')">🗑️ Очистить</button>
         </div>
         <div class="input-row">
-            <input id="input" placeholder="Спроси что угодно..." autofocus>
+            <input id="input" placeholder="Спроси что угодно или кинь фото..." autofocus>
             <button id="sendBtn">➤</button>
         </div>
     </div>
@@ -1157,6 +1272,7 @@ HTML_TEMPLATE = """
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         const msgCount = document.getElementById('msgCount');
+        const fileInput = document.getElementById('fileInput');
         
         let userId = localStorage.getItem('awesome_user_id');
         if (!userId) {
@@ -1169,7 +1285,7 @@ HTML_TEMPLATE = """
             msgCount.textContent = msgs;
         }
         
-        function addMessage(text, isUser) {
+        function addMessage(text, isUser, isImage = false) {
             const welcome = chat.querySelector('.welcome');
             if (welcome) welcome.remove();
             const div = document.createElement('div');
@@ -1199,6 +1315,37 @@ HTML_TEMPLATE = """
                 chat.scrollTop = chat.scrollHeight;
             }
         }
+        
+        // Обработка фото
+        fileInput.addEventListener('change', function(e) {
+            const files = this.files;
+            for (const file of files) {
+                if (!file.type.startsWith('image/')) continue;
+                const reader = new FileReader();
+                reader.onload = async function(ev) {
+                    const base64 = ev.target.result.split(',')[1];
+                    addMessage('📸 Отправка фото...', true);
+                    showTyping(true);
+                    try {
+                        const resp = await fetch('/api/analyze_image', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ image: base64, user_id: parseInt(userId) })
+                        });
+                        const data = await resp.json();
+                        showTyping(false);
+                        if (data.error) addMessage('⚠️ ' + data.error, false);
+                        else if (data.reply) addMessage(data.reply, false);
+                        else addMessage('⚠️ Не удалось распознать', false);
+                    } catch (e) {
+                        showTyping(false);
+                        addMessage('⚠️ Ошибка обработки', false);
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+            this.value = '';
+        });
         
         async function sendMessage(text) {
             const msg = text || input.value.trim();
@@ -1242,14 +1389,14 @@ HTML_TEMPLATE = """
                 chat.innerHTML = `
                     <div class="welcome">
                         <h1>✨ AWESOME AI 2026</h1>
-                        <p>Диалог очищен! Начинай заново</p>
+                        <p>📸 Кидай фото — я распознаю! 🎨 Пиши /draw — я нарисую!</p>
                         <div class="features">
-                            <span>🧠 Абсолютная память</span>
+                            <span>🧠 Память</span>
+                            <span>📸 Фото</span>
+                            <span>🎨 Рисование</span>
                             <span>🌤 Погода</span>
                             <span>💵 Курсы</span>
                             <span>🪙 Крипта</span>
-                            <span>🎨 Рисование</span>
-                            <span>📜 История</span>
                         </div>
                     </div>
                 `;
@@ -1320,13 +1467,51 @@ HTML_TEMPLATE = """
             animate();
         })();
         
+        // ЗАГРУЗКА ИСТОРИИ ПРИ ЗАХОДЕ
+        async function loadHistory() {
+            try {
+                const resp = await fetch('/api/get_history', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: parseInt(userId) })
+                });
+                const data = await resp.json();
+                if (data.history && data.history.length > 0) {
+                    // Удаляем приветствие
+                    const welcome = chat.querySelector('.welcome');
+                    if (welcome) welcome.remove();
+                    
+                    // Загружаем все сообщения
+                    for (const msg of data.history) {
+                        const div = document.createElement('div');
+                        div.className = 'message ' + (msg.role === 'user' ? 'user' : 'bot');
+                        let formatted = msg.content;
+                        if (msg.role === 'assistant') {
+                            formatted = formatted.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+                            formatted = formatted.replace(/\\*(.*?)\\*/g, '<i>$1</i>');
+                            formatted = formatted.replace(/`(.*?)`/g, '<code>$1</code>');
+                            formatted = formatted.replace(/!\\[(.*?)\\]\\((data:image\\/[^)]+)\\)/g, '<img src="$2" alt="$1">');
+                        }
+                        formatted = formatted.replace(/\\n/g, '<br>');
+                        div.innerHTML = formatted;
+                        chat.appendChild(div);
+                    }
+                    updateCount();
+                    chat.scrollTop = chat.scrollHeight;
+                }
+            } catch (e) {
+                console.log('Ошибка загрузки истории:', e);
+            }
+        }
+        
         document.addEventListener('DOMContentLoaded', () => {
             input.focus();
             input.addEventListener('keydown', e => {
                 if (e.key === 'Enter') { e.preventDefault(); sendMessage(); }
             });
             sendBtn.addEventListener('click', e => { e.preventDefault(); sendMessage(); });
-            updateCount();
+            // Загружаем историю
+            loadHistory();
         });
     </script>
 </body>
@@ -1340,6 +1525,18 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+@app.route('/api/get_history', methods=['POST', 'OPTIONS'])
+def get_history_api():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        data = request.json
+        user_id = data.get('user_id', 1)
+        history = get_full_dialog(user_id, limit=999)
+        return jsonify({'history': history})
+    except:
+        return jsonify({'history': []})
+
 @app.route('/api/clear_history', methods=['POST', 'OPTIONS'])
 def clear_history_api():
     if request.method == 'OPTIONS':
@@ -1351,6 +1548,32 @@ def clear_history_api():
         return jsonify({'status': 'ok'})
     except:
         return jsonify({'status': 'error'})
+
+@app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
+def analyze_image():
+    if request.method == 'OPTIONS':
+        return '', 200
+    try:
+        data = request.json
+        image_base64 = data.get('image')
+        user_id = data.get('user_id', 1)
+        if not image_base64:
+            return jsonify({'error': 'Нет изображения'})
+        
+        # Пробуем анализ через GigaChat
+        analysis = analyze_image_with_gigachat(image_base64)
+        if not analysis:
+            analysis = analyze_image_with_yandex(image_base64)
+        if not analysis:
+            analysis = simple_image_analysis(image_base64)
+        
+        remember(user_id, "фото", "Пользователь отправил фото")
+        increment_messages(user_id)
+        add_to_dialog(user_id, 'user', '📸 Отправил фото')
+        add_to_dialog(user_id, 'assistant', analysis)
+        return jsonify({'reply': analysis})
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 @app.route('/api/chat', methods=['POST', 'OPTIONS'])
 def chat():
@@ -1371,6 +1594,23 @@ def chat():
 
         if not can_send_message(user_id):
             return jsonify({'reply': "🔴 Лимит исчерпан!\n💎 Купи Premium: /premium"})
+
+        # Генерация изображения через /draw
+        if message.startswith('/draw'):
+            prompt = message.replace('/draw', '').strip()
+            if not prompt:
+                return jsonify({'reply': "❌ Напиши: /draw [описание]"})
+            
+            # Пытаемся сгенерировать
+            image_data = generate_image_from_gigachat(prompt)
+            if image_data:
+                b64_img = base64.b64encode(image_data).decode('utf-8')
+                reply = f"🎨 *{prompt}*\n\n![image](data:image/png;base64,{b64_img})"
+                add_to_dialog(user_id, 'user', f"/draw {prompt}")
+                add_to_dialog(user_id, 'assistant', reply)
+                return jsonify({'reply': reply})
+            else:
+                return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку. Попробуй другое описание."})
 
         if message.startswith('/'):
             cmd = message.lower().strip()
@@ -1402,7 +1642,7 @@ def chat():
                         status_text += f" (до {format_date(expires)})"
                 dialog_len = len(get_dialog(user_id))
                 db_len = len(get_history_from_db(user_id, 999))
-                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память в сессии: {dialog_len}\n💾 Всего в БД: {db_len}"
+                reply = f"📊 *СТАТУС*\n\n👤 {status_text}\n📨 {messages}/{FREE_LIMIT if not premium else '♾️'}\n🧠 Память: {dialog_len} сообщений\n💾 Всего в БД: {db_len}"
                 return jsonify({'reply': reply})
                 
             elif cmd == '/premium':
@@ -1410,11 +1650,11 @@ def chat():
                 if has_premium:
                     expires = get_premium_expires(user_id)
                     if expires:
-                        return jsonify({'reply': f"💎 У ТЕБЯ ЕСТЬ PREMIUM!\n\n⏳ До: {format_date(expires)}\n📨 Лимит: ♾️ БЕЗЛИМИТНО"})
+                        return jsonify({'reply': f"💎 У ТЕБЯ ЕСТЬ PREMIUM!\n\n⏳ До: {format_date(expires)}\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n📸 Распознавание фото\n🎨 Генерация картинок"})
                     else:
-                        return jsonify({'reply': "💎 У ТЕБЯ ЕСТЬ PREMIUM!\n\n📨 Лимит: ♾️ БЕЗЛИМИТНО"})
+                        return jsonify({'reply': "💎 У ТЕБЯ ЕСТЬ PREMIUM!\n\n📨 Лимит: ♾️ БЕЗЛИМИТНО\n📸 Распознавание фото\n🎨 Генерация картинок"})
                 else:
-                    return jsonify({'reply': "💎 PREMIUM AWESOME AI\n\n🔥 ЧТО ТЫ ПОЛУЧАЕШЬ:\n♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n\n💰 100₽/месяц\n🎁 Попробуй /test"})
+                    return jsonify({'reply': "💎 PREMIUM AWESOME AI\n\n🔥 ЧТО ТЫ ПОЛУЧАЕШЬ:\n♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n📸 РАСПОЗНАВАНИЕ ФОТО\n🎨 ГЕНЕРАЦИЯ КАРТИНОК\n🚀 Приоритетная обработка\n🧠 Максимально глубокие ответы\n\n💰 100₽/месяц\n🎁 Попробуй /test"})
                 
             elif cmd == '/test':
                 try:
@@ -1443,7 +1683,7 @@ def chat():
                         conn.close()
                     except:
                         pass
-                    return jsonify({'reply': "🎉 ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!\n\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ Приоритетная обработка\n\n⏳ Доступ активен 48 часов."})
+                    return jsonify({'reply': "🎉 ПРОБНЫЙ PREMIUM АКТИВИРОВАН НА 2 ДНЯ!\n\n✅ ♾️ БЕЗЛИМИТНЫЕ СООБЩЕНИЯ\n✅ 📸 РАСПОЗНАВАНИЕ ФОТО\n✅ 🎨 ГЕНЕРАЦИЯ КАРТИНОК\n✅ Приоритетная обработка\n\n⏳ Доступ активен 48 часов."})
                 else:
                     return jsonify({'reply': '❌ Ошибка при активации теста'})
                     
@@ -1472,7 +1712,7 @@ def chat():
                     status = f"🔓 Бесплатный ({remaining}/{FREE_LIMIT})"
                     limit_text = f"{FREE_LIMIT}/день"
                     
-                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память в сессии: {dialog_len}\n💾 Всего в БД: {db_len}\n📅 Вход: {joined_at}"})
+                return jsonify({'reply': f"👤 ПРОФИЛЬ\n\n🆔 ID: {user_id}\n💎 Статус: {status}\n📨 Лимит: {limit_text}\n✉️ Сегодня: {messages}\n🧠 Память: {dialog_len} сообщений\n💾 Всего в БД: {db_len}\n📅 Вход: {joined_at}"})
                 
             elif cmd == '/stats':
                 if user_id == OWNER_ID or is_admin(user_id):
@@ -1510,11 +1750,10 @@ def chat():
 
 🌐 ЧТО Я УМЕЮ:
 • 🧠 ЗАПОМИНАЮ ВЕСЬ ДИАЛОГ НАВСЕГДА!
-• 📚 ОТВЕЧАЮ НА ЛЮБЫЕ ВОПРОСЫ
+• 📸 РАСПОЗНАЮ ФОТОГРАФИИ!
+• 🎨 ГЕНЕРИРУЮ КАРТИНКИ ПО ОПИСАНИЮ!
 • 🌤 Погода с прогнозом
 • 💵 Курс валют и криптовалют
-• 🎨 Генерирую картинки
-• 🧠 Помню имя и интересы
 
 📋 КОМАНДЫ:
 /status — Статус
@@ -1525,13 +1764,14 @@ def chat():
 /help — Помощь
 /clear — Очистить диалог
 /history — Показать весь диалог
+/draw [описание] — Сгенерировать картинку
 /weather [город] — Погода
 /exchange — Курс валют
 /crypto — Криптовалюты
-/draw [описание] — Сгенерировать картинку
 
-🧠 Я ЗАПОМИНАЮ ВСЁ, ЧТО ТЫ ГОВОРИШЬ - НАВСЕГДА!
-❓ ТЫ МОЖЕШЬ СПРОСИТЬ МЕНЯ О ЧЁМ УГОДНО!"""})
+📸 ПРОСТО КИНЬ ФОТО — Я РАСПОЗНАЮ!
+🎨 НАПИШИ /draw [описание] — Я НАРИСУЮ!
+🧠 Я ЗАПОМИНАЮ ВСЁ, ЧТО ТЫ ГОВОРИШЬ - НАВСЕГДА!"""})
                 
             elif cmd.startswith('/weather'):
                 city = extract_city_from_query(message)
@@ -1551,17 +1791,6 @@ def chat():
             elif cmd == '/crypto':
                 crypto = get_crypto_rates()
                 return jsonify({'reply': crypto or "🪙 Не удалось получить курс криптовалют."})
-                
-            elif cmd.startswith('/draw'):
-                prompt = message.replace('/draw', '').strip()
-                if not prompt:
-                    return jsonify({'reply': "❌ Напиши: /draw [описание]"})
-                image_data = generate_image(prompt)
-                if image_data:
-                    b64_img = base64.b64encode(image_data).decode('utf-8')
-                    return jsonify({'reply': f"🎨 *{prompt}*\n\n![image](data:image/png;base64,{b64_img})"})
-                else:
-                    return jsonify({'reply': "⚠️ Не удалось сгенерировать картинку."})
 
         response = process_message_with_history(user_id, message)
         if response:
@@ -1572,23 +1801,6 @@ def chat():
 
     except Exception as e:
         print(f"❌ Ошибка: {e}", flush=True)
-        return jsonify({'error': str(e)})
-
-@app.route('/api/analyze_image', methods=['POST', 'OPTIONS'])
-def analyze_image():
-    if request.method == 'OPTIONS':
-        return '', 200
-    try:
-        data = request.json
-        image_base64 = data.get('image')
-        user_id = data.get('user_id', 1)
-        if not image_base64:
-            return jsonify({'error': 'Нет изображения'})
-        description = "📸 Изображение получено!"
-        remember(user_id, "фото", "Пользователь отправил фото")
-        increment_messages(user_id)
-        return jsonify({'reply': description})
-    except Exception as e:
         return jsonify({'error': str(e)})
 
 @app.route('/api/speech_to_text', methods=['POST', 'OPTIONS'])
@@ -1724,15 +1936,14 @@ def admin_panel():
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 8080))
     print("=" * 50, flush=True)
-    print("🧠 AWESOME AI 2026 - АБСОЛЮТНАЯ ПАМЯТЬ!", flush=True)
+    print("🧠 AWESOME AI 2026 - С ФОТО И РИСОВАНИЕМ!", flush=True)
     print("=" * 50, flush=True)
     print(f"👑 Владелец ID: {OWNER_ID}", flush=True)
     print(f"🌐 http://0.0.0.0:{port}", flush=True)
     print("=" * 50, flush=True)
-    print("✅ Бот ЗАПОМИНАЕТ ВЕСЬ ДИАЛОГ НАВСЕГДА!", flush=True)
-    print("✅ Отвечает на ЛЮБЫЕ вопросы", flush=True)
-    print("✅ Помнит имя, интересы, предпочтения", flush=True)
-    print("✅ /history - показать весь диалог", flush=True)
-    print("✅ /clear - очистить диалог", flush=True)
+    print("✅ 📸 РАСПОЗНАЁТ ФОТОГРАФИИ!", flush=True)
+    print("✅ 🎨 ГЕНЕРИРУЕТ КАРТИНКИ!", flush=True)
+    print("✅ 🧠 ПОМНИТ ВЕСЬ ДИАЛОГ НАВСЕГДА!", flush=True)
+    print("✅ 💾 ИСТОРИЯ СОХРАНЯЕТСЯ В БД", flush=True)
     print("=" * 50, flush=True)
     app.run(host='0.0.0.0', port=port, debug=True)
