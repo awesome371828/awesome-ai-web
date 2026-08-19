@@ -1,4 +1,4 @@
-\#!/usr/bin/env python3
+#!/usr/bin/env python3
 import sys
 print("🔴 AWESOME AI WEB - СУПЕР ЗАПУСК!", flush=True)
 
