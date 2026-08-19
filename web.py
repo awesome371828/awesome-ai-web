@@ -715,7 +715,6 @@ def increment_messages(user_id):
     conn.close()
 
 def check_spam(user_id):
-    # Простая защита от спама
     return False
 
 # ============================================================
@@ -1174,12 +1173,10 @@ def generate_fallback_response(user_text, search_result=None):
 def process_message(user_id, user_text, image_description=None):
     text_lower = user_text.lower().strip()
     
-    # 1. МАТЕМАТИКА
     math_result = solve_math(user_text)
     if math_result is not None:
         return math_result
     
-    # 2. ПРАЗДНИКИ
     if any(kw in text_lower for kw in ['праздник', 'праздники', 'какой сегодня праздник', 'сегодня праздник', 'седня']):
         today = get_current_date()
         month_day = today[3:5] + '.' + today[0:2]
@@ -1213,7 +1210,6 @@ def process_message(user_id, user_text, image_description=None):
             return f"📅 *{today} (МСК)*\n\n{holidays[month_day]}"
         return f"📅 *{today} (МСК)*\n\nПраздников не найдено"
     
-    # 3. ПОГОДА
     if any(kw in text_lower for kw in ['погода', 'weather']):
         city_match = re.search(r'(в|в городе)\s+([а-яА-Яa-zA-Z\- ]+)', text_lower)
         if city_match:
@@ -1224,27 +1220,23 @@ def process_message(user_id, user_text, image_description=None):
             return f"🌤 Не удалось получить погоду для '{city}'"
         return "🌤 Напиши: погода в [город]"
     
-    # 4. КУРС
     if any(kw in text_lower for kw in ['курс', 'доллар', 'евро', 'валюта']):
         currency = get_currency_fast()
         if currency:
             return currency
         return "💵 Не удалось получить курс"
     
-    # 5. КРИПТА
     if any(kw in text_lower for kw in ['биткоин', 'btc', 'эфириум', 'eth', 'крипта']):
         crypto = get_crypto_fast()
         if crypto:
             return crypto
         return "🪙 Не удалось получить курс криптовалют"
     
-    # 6. ПОИСК
     if len(user_text) > 2:
         search_result = search_all_internet(user_text)
         if search_result:
             return f"🔍 *{user_text}*\n\n{search_result}"
     
-    # 7. НЕЙРОСЕТИ
     current_date = get_current_date()
     current_time = get_moscow_time().strftime('%H:%M')
     system_prompt = SUPER_SYSTEM_PROMPT.format(
@@ -2220,7 +2212,7 @@ def deladmin_cmd(m):
             user_command_ids[user_id] = []
         user_command_ids[user_id].append(m.message_id)
         user_command_ids[user_id].append(msg.message_id)
-        return  # ← ЭТО ВНУТРИ ФУНКЦИИ - НОРМАЛЬНО
+        return
     
     args = m.text.split()[1:]
     if len(args) < 1:
@@ -2229,7 +2221,7 @@ def deladmin_cmd(m):
             user_command_ids[user_id] = []
         user_command_ids[user_id].append(m.message_id)
         user_command_ids[user_id].append(msg.message_id)
-        return  # ← ЭТО ВНУТРИ ФУНКЦИИ - НОРМАЛЬНО
+        return
     
     try:
         target_id = int(args[0])
@@ -2241,29 +2233,28 @@ def deladmin_cmd(m):
         user_command_ids[user_id].append(msg.message_id)
         return
     
-if target_id == OWNER_ID:
-    msg = bot.send_message(chat_id, "⚠️ Нельзя забрать админку у владельца!")
-    if user_id not in user_command_ids:
-        user_command_ids[user_id] = []              # ← 8 ПРОБЕЛОВ (4+4)
-        user_command_ids[user_id].append(m.message_id)   # ← 8 ПРОБЕЛОВ
-        user_command_ids[user_id].append(msg.message_id)  # ← 8 ПРОБЕЛОВ
-    return                                         # ← 4 ПРОБЕЛА (внутри if target_id)
+    if target_id == OWNER_ID:
+        msg = bot.send_message(chat_id, "⚠️ Нельзя забрать админку у владельца!")
+        if user_id not in user_command_ids:
+            user_command_ids[user_id] = []
+        user_command_ids[user_id].append(m.message_id)
+        user_command_ids[user_id].append(msg.message_id)
+        return
     
-set_admin(target_id, False)   # ← ЭТОТ КОД ВЫПОЛНИТСЯ
-msg = bot.send_message(chat_id, f"👋 У пользователя {target_id} забрали админку!", parse_mode='Markdown')
-try:
-    bot.send_message(target_id, "👋 У ВАС ЗАБРАЛИ АДМИНКУ!", parse_mode='Markdown')
-except:
-    pass
-
-if user_id not in user_command_ids:
-    user_command_ids[user_id] = []
+    set_admin(target_id, False)
+    msg = bot.send_message(chat_id, f"👋 У пользователя {target_id} забрали админку!", parse_mode='Markdown')
+    try:
+        bot.send_message(target_id, "👋 У ВАС ЗАБРАЛИ АДМИНКУ!", parse_mode='Markdown')
+    except:
+        pass
+    
+    if user_id not in user_command_ids:
+        user_command_ids[user_id] = []
     user_command_ids[user_id].append(m.message_id)
     user_command_ids[user_id].append(msg.message_id)
 
-@bot.message_handler(commands=['info'])  # ← ИСПРАВЛЕНО!
+@bot.message_handler(commands=['info'])
 def info_cmd(m):
-    # код функции info_cmd
     chat_id = m.chat.id
     user_id = m.from_user.id
     delete_previous_messages(chat_id, user_id)
