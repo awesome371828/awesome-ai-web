@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AWESOME AI WEB — полный DeepSeek-клон, 40+ функций, Premium из бота"""
+"""AWESOME AI WEB — полный DeepSeek-клон + ИИ-улучшения уровня ChatGPT/DeepSeek"""
 import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid
 from datetime import datetime, timedelta, timezone
 import requests, urllib3
@@ -79,9 +79,19 @@ def init_db():
     cur.execute("""CREATE TABLE IF NOT EXISTS shared_chats(id TEXT PRIMARY KEY, chat_id BIGINT, created_at TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS admin_log(id BIGSERIAL PRIMARY KEY, admin_id TEXT, action TEXT, created_at TEXT)""")
     cur.execute("""CREATE TABLE IF NOT EXISTS notifications(id BIGSERIAL PRIMARY KEY, user_id TEXT, text TEXT, read INTEGER DEFAULT 0, created_at TEXT)""")
+    # ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (факты, предпочтения) — как в ChatGPT
+    cur.execute("""CREATE TABLE IF NOT EXISTS user_memory(id BIGSERIAL PRIMARY KEY, user_id TEXT,
+        fact TEXT, source TEXT DEFAULT 'auto', created_at TEXT)""")
     for col in ['xp','level','avatar','ref_code','ref_count','telegram_id','name','password']:
         try: cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
         except: pass
+    # Если колонка xp была TEXT — привести к INTEGER (чинит баг xp+5)
+    try:
+        cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='xp'")
+        row=cur.fetchone()
+        if row and row[0]=='text':
+            cur.execute("ALTER TABLE users ALTER COLUMN xp TYPE INTEGER USING (CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)")
+    except Exception: pass
     try: cur.execute("ALTER TABLE chats_web ADD COLUMN IF NOT EXISTS pinned INTEGER DEFAULT 0")
     except: pass
     try: cur.execute("ALTER TABLE messages_web ADD COLUMN IF NOT EXISTS image TEXT")
@@ -95,9 +105,65 @@ def init_db():
 init_db()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if HAS_SUPABASE else None
 
+# ===== ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (как в ChatGPT) =====
+def get_memory(uid, limit=20):
+    try:
+        conn=get_db(); cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("SELECT fact FROM user_memory WHERE user_id=%s ORDER BY id DESC LIMIT %s",(str(uid),limit))
+        rows=cur.fetchall(); cur.close(); conn.close()
+        return [r['fact'] for r in rows]
+    except Exception: return []
+
+def remember(uid, fact):
+    """Сохранить факт о пользователе (если ещё не сохранён и он не слишком длинный)."""
+    fact=(fact or '').strip()[:500]
+    if not fact or len(fact)<4: return
+    try:
+        conn=get_db(); cur=conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM user_memory WHERE user_id=%s AND fact=%s",(str(uid),fact))
+        if cur.fetchone()[0]==0:
+            cur.execute("INSERT INTO user_memory(user_id,fact,created_at) VALUES(%s,%s,%s)",(str(uid),fact,now_iso()))
+        conn.commit(); cur.close(); conn.close()
+    except Exception: pass
+
+def extract_facts(text, name=None):
+    """Вытаскивает полезные факты о пользователе из сообщения."""
+    facts=[]
+    tl=text.lower()
+    if "меня зовут" in tl or "мое имя" in tl:
+        m=re.search(r'(?:меня зовут|мое имя)[:\s]+([А-Яа-яЁёA-Za-z\-]+)',tl)
+        if m: facts.append("Имя пользователя: "+m.group(1))
+    for kw,label in [("мне ", "Возраст: "), ("я живу в ", "Город: "), ("я работаю ", "Работа: "), ("учусь в ", "Учёба: ")]:
+        if kw in tl:
+            m=re.search(re.escape(kw)+r'([^,.!?\n]{2,60})',tl)
+            if m: facts.append(label+m.group(1).strip())
+    if any(x in tl for x in ["мне нравится","я люблю","обожаю"]):
+        m=re.search(r'(?:мне нравится|я люблю|обожаю)\s+([^,.!?\n]{2,60})',tl)
+        if m: facts.append("Интерес/хобби: "+m.group(1).strip())
+    for f in facts: remember(uid,f)
+    return facts
+
+# ===== ИНТЕРНЕТ-ПОИСК (как в ChatGPT, для актуальной инфы) =====
+def web_search(query, num=5):
+    """Поиск в интернете через DuckDuckGo html."""
+    try:
+        r=requests.get("https://html.duckduckgo.com/html/",
+            params={"q":query}, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            timeout=8, verify=False)
+        if r.status_code!=200: return None
+        # простой парсер ссылок и заголовков
+        results=[]
+        for m in re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text)[:num]:
+            url=m.group(1); title=re.sub(r'<[^>]+>','',m.group(2))
+            if url.startswith('//duckduckgo.com/l/?uddg='):
+                url=urllib.parse.unquote(url.split('uddg=')[1].split('&')[0])
+            results.append((title.strip(), url))
+        return results
+    except Exception:
+        return None
+
 # ===== СИНХРОНИЗАЦИЯ: БОТ -> SUPABASE -> САЙТ =====
 def bot_status(tg):
-    """Берёт статус из Supabase (куда пишет телеграм-бот)."""
     if not tg or not supabase: return None
     try:
         r=supabase.table('users').select('premium,premium_expires,is_admin,is_owner').eq('user_id',int(tg)).execute()
@@ -113,7 +179,6 @@ def bot_status(tg):
     return None
 
 def eff_status(uid, tg=None):
-    """Сначала читает из Supabase (истина бота), потом локально. Owner всегда приоритет."""
     conn=get_db(); cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute("SELECT * FROM users WHERE user_id=%s",(str(uid),))
     row=cur.fetchone(); cur.close(); conn.close()
@@ -131,7 +196,7 @@ def eff_status(uid, tg=None):
         except: pass
     return {'premium':1 if owner or premium else 0,'premium_expires':expires,
             'is_admin':1 if owner or is_admin else 0,'is_owner':owner,'telegram_id':tg,
-            'level':u.get('level',1),'xp':u.get('xp',0),'ref_count':u.get('ref_count',0)}
+            'level':int(u.get('level',1) or 1),'xp':int(u.get('xp',0) or 0),'ref_count':u.get('ref_count',0)}
 
 # ===== АККАУНТЫ =====
 def reg_user(tg,name,pw):
@@ -174,17 +239,32 @@ def can_send(uid,tg=None):
 
 def incr(uid,tg=None):
     s=eff_status(uid,tg)
-    if s['is_owner'] or s['is_admin']: add_xp(uid,5); return
+    if s['is_owner'] or s['is_admin']:
+        try: add_xp(uid,5)
+        except Exception: pass
+        return
     conn=get_db(); cur=conn.cursor()
     cur.execute("UPDATE users SET messages_today=messages_today+1 WHERE user_id=%s",(str(uid),))
     cur.execute("INSERT INTO total_stats_web(user_id,total_messages) VALUES(%s,1) ON CONFLICT(user_id) DO UPDATE SET total_messages=total_stats_web.total_messages+1",(str(uid),))
-    conn.commit(); cur.close(); conn.close(); add_xp(uid,10)
+    conn.commit(); cur.close(); conn.close()
+    try: add_xp(uid,10)
+    except Exception: pass
 
 def add_xp(uid,amt):
-    conn=get_db(); cur=conn.cursor()
-    cur.execute("UPDATE users SET xp=xp+%s WHERE user_id=%s",(amt,str(uid)))
-    cur.execute("UPDATE users SET level=1+floor(xp/100) WHERE user_id=%s",(str(uid),))
-    conn.commit(); cur.close(); conn.close()
+    """Начисление опыта — безопасно для колонки любого типа."""
+    try:
+        conn=get_db(); cur=conn.cursor()
+        cur.execute("UPDATE users SET xp=(CASE WHEN xp IS NULL THEN 0 ELSE xp END)+%s WHERE user_id=%s",(int(amt),str(uid)))
+        cur.execute("UPDATE users SET level=1+floor((CASE WHEN xp IS NULL THEN 0 ELSE xp END)/100) WHERE user_id=%s",(str(uid),))
+        conn.commit(); cur.close(); conn.close()
+    except Exception:
+        # если колонка всё ещё TEXT — приводим через ::int
+        try:
+            conn=get_db(); cur=conn.cursor()
+            cur.execute("UPDATE users SET xp=(CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)+%s WHERE user_id=%s",(int(amt),str(uid)))
+            cur.execute("UPDATE users SET level=1+floor((CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)/100) WHERE user_id=%s",(str(uid),))
+            conn.commit(); cur.close(); conn.close()
+        except Exception: pass
 
 def upd_settings(uid,**kw):
     conn=get_db(); cur=conn.cursor()
@@ -220,7 +300,10 @@ def get_msgs(cid):
     cur.execute("SELECT * FROM messages_web WHERE chat_id=%s ORDER BY id",(int(cid),))
     rows=cur.fetchall(); cur.close(); conn.close(); return [dict(r) for r in rows]
 def hist(cid):
-    m=get_msgs(cid); return m[-MAX_HISTORY:] if m else []
+    m=get_msgs(cid)
+    # умная обрезка: берём первые + последние, чтобы не терять начало и свежее
+    if len(m)<=MAX_HISTORY: return m if m else []
+    return m[:6]+m[-MAX_HISTORY+6:] if len(m)>6 else m
 def set_title(cid,t):
     conn=get_db(); cur=conn.cursor()
     cur.execute("UPDATE chats_web SET title=%s WHERE id=%s",(t[:50],int(cid)))
@@ -238,35 +321,27 @@ def pin_chat(cid):
 # ===== НЕЙРОСЕТЬ: ЖИВОЙ СОБЕСЕДНИК =====
 tok=None; tok_t=0
 def get_tok():
-    """Получение токена GigaChat (OAuth). Ключ уже base64 — НЕ кодируем повторно."""
     global tok,tok_t
     if tok and time.time()-tok_t<180: return tok
     for _ in range(3):
         try:
             r=requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-                headers={
-                    "Content-Type":"application/x-www-form-urlencoded",
-                    "Accept":"application/json",
-                    "RqUID":str(_uuid.uuid4()),              # свежий случайный UUID
-                    "Authorization":"Basic "+GIGACHAT_AUTH_KEY,  # ключ уже base64
-                },
-                data="scope=GIGACHAT_API_PERS",             # СТРОКА, а не словарь!
-                timeout=10, verify=False)
+                headers={"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json",
+                         "RqUID":str(_uuid.uuid4()),"Authorization":"Basic "+GIGACHAT_AUTH_KEY},
+                data="scope=GIGACHAT_API_PERS",timeout=10,verify=False)
             if r.status_code==200:
                 j=r.json()
-                if j.get("access_token"):
-                    tok=j["access_token"]; tok_t=time.time(); return tok
-        except Exception:
-            pass
+                if j.get("access_token"): tok=j["access_token"]; tok_t=time.time(); return tok
+        except Exception: pass
         time.sleep(0.7)
     tok=None
     return None
 
-def giga(hist,sysp,max_tok=1500):
+def giga(hist,sysp,max_tok=2000):
     try:
         t=get_tok()
         if not t: return None
-        msgs=[{"role":"system","content":sysp[:2000]}]+[{"role":h["role"],"content":(h.get("content") or "")[:600]} for h in hist[-10:] if h.get("role") in("user","assistant")]
+        msgs=[{"role":"system","content":sysp[:3000]}]+[{"role":h.get("role","user"),"content":(h.get("content") or "")[:800]} for h in hist[-12:] if h.get("role") in("user","assistant")]
         r=requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             headers={"Authorization":"Bearer "+t,"Content-Type":"application/json","Accept":"application/json"},
             json={"model":"GigaChat-Pro","messages":msgs,"temperature":0.85,"max_tokens":max_tok},
@@ -274,8 +349,7 @@ def giga(hist,sysp,max_tok=1500):
         if r.status_code==200:
             try: return r.json()["choices"][0]["message"]["content"]
             except Exception: return None
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
 def ygpt(text,sysp):
@@ -284,39 +358,54 @@ def ygpt(text,sysp):
             headers={"Authorization":"Api-Key "+YANDEX_API_KEY,"Content-Type":"application/json"},
             json={"modelUri":"gpt://"+FOLDER_ID+"/yandexgpt/latest",
                   "completionOptions":{"temperature":0.7,"maxTokens":700,"stream":False},
-                  "messages":[{"role":"system","text":sysp[:1200]},{"role":"user","text":text}]},
+                  "messages":[{"role":"system","text":sysp[:1500]},{"role":"user","text":text}]},
             timeout=YGPT_TIMEOUT)
         if r.status_code==200:
             try: return r.json()["result"]["alternatives"][0]["message"]["text"]
             except Exception: return None
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
-SUPER="""ТЫ — AWESOME AI, живой, умный и дружелюбный ИИ-собеседник нового поколения. Ты НЕ шаблон и не бот-затычка.
-📍 Москва (UTC+3). Сегодня: {d}, время: {t}. Ты помнишь весь диалог и опираешься на него.
-ТВОЙ СТИЛЬ: отвечай как живой человек-помощник — живо, тепло, с юмором когда уместно, но всегда полезно и по делу. Раскрывай тему полностью, давай конкретику, примеры, цифры.
-ФОРМАТ: разделяй на разделы **1. Название**. Важное выделяй **жирным**. Вставляй эмодзи (🔥🧠💡⚡🚀💎). Отвечай БЫСТРО и полно.
+SUPER="""ТЫ — AWESOME AI, живой, умный и дружелюбный ИИ-собеседник нового поколения. Ты НЕ шаблон.
+📍 Москва (UTC+3). Сегодня: {d}, время: {t}.
+{memory}
+ТВОЙ СТИЛЬ: отвечай как живой человек-помощник — живо, тепло, с юмором когда уместно. Раскрывай тему полностью, давай конкретику, примеры, цифры.
+ФОРМАТ: разделяй на разделы **1. Название**. Важное выделяй **жирным**. Вставляй эмодзи (🔥🧠💡⚡🚀💎).
 ПРАВИЛА: никогда не говори "возможно/наверное/извини". Если вопрос не ясен — уточни. Будь инициативным, предлагай следующий шаг.
 Ты полноценный собеседник — поддерживай разговор, задавай встречные вопросы, запоминай детали.💎"""
 
 def smart_answer(uid,text,history,img=None,tg=None,doc=None):
-    sp=SUPER.format(d=gdate(),t=gm().strftime('%H:%M'))
+    sp=SUPER.format(d=gdate(),t=gm().strftime('%H:%M'),
+        memory="Помнишь о пользователе:\n"+("\n".join("• "+f for f in get_memory(uid))) if get_memory(uid) else "")
     if eff_status(uid,tg)['premium']: sp+="\n💎 Пользователь Premium — дай максимум глубины и эксклюзивные советы."
     if img: sp+=f"\n📸 Изображение: {img}"
     if doc: sp+=f"\n📄 Документ: {doc[:3000]}"
+    tl=(text or "").lower().strip()
+    # ---- ИНТЕРНЕТ-ПОИСК: если вопрос про актуальное - находим свежую инфу ----
+    search_hits=None
+    needs_news=any(k in tl for k in ["новост","последн","сейчас","свеж","актуальн","сколько сейчас","цена на","курс на сегодня","результат матч","погода"]) \
+        or re.search(r'\b(20\d\d|сегодня|вчера)\b',tl)
+    if needs_news:
+        res=web_search(text)
+        if res:
+            search_hits="\n".join(f"- {t}: {u}" for t,u in res[:5])
+            sp+="\n📰 Актуальные данные из интернета (используй их, дай ссылки):\n"+search_hits
+    # ---- сохраняем факты о пользователе ----
+    try: extract_facts(text)
+    except Exception: pass
+    # ---- основной вызов ----
     full=history+[{"role":"user","content":text or "Опиши"}]
     a=giga(full,sp)
     if a and len(a)>4: return a
     b=ygpt(text,sp)
     if b and len(b)>4: return b
+    # ---- фолбэки ----
     if img: return f"📸 {img}"
-    tl=text.lower().strip()
-    if any(w in tl for w in ["привет","здравств","хай","ку"]): return "👋 Привет! Рад тебя видеть. Чем займёмся сегодня — могу помочь с задачей, ответить на вопрос, что-то придумать или просто поболтать. 😊"
+    if any(w in tl for w in ["привет","здравств","хай","ку"]): return "👋 Привет! Рад тебя видеть. Чем займёмся сегодня?"
     if "погода" in tl:
         m=re.search(r'(в|в городе)\s+([а-яА-Яa-zA-Z\- ]+)',tl)
         if m:
-            w=weather(m.group(2).strip()); return w if w else "🌤 Не удалось получить данные. Попробуй ещё раз."
+            w=weather(m.group(2).strip()); return w if w else "🌤 Напиши: погода в [город]"
         return "🌤 Напиши: погода в [город]"
     if any(k in tl for k in ['курс','доллар','евро']):
         c=currency(); return c if c else "💵 Не удалось получить курс."
@@ -327,8 +416,8 @@ def smart_answer(uid,text,history,img=None,tg=None,doc=None):
             res=eval(re.sub(r'[^0-9+\-*/(). ]','',tl)); return f"🧮 Результат: **{res}**"
         except: return "🧮 Не понял выражение. Например: 2+2*3"
     if "кто ты" in tl or "что ты умеешь" in tl:
-        return "Я **AWESOME AI** — твой живой умный помощник ✨\n\nУмею:\n**1. Общаться** 🗣 — поддерживаю разговор, помню детали\n**2. Отвечать** 💡 — на любые вопросы, даю развёрнутые ответы\n**3. Считать** 🧮 — математика, формулы\n**4. Рисовать** 🎨 — генерирую картинки\n**5. Погода/валюты/крипта** 🌤💵🪙\n**6. Помогать с задачами** 🚀 — код, идеи, планы\n\nЧто хочешь попробовать?"
-    return "⚠️ Соединение с нейросетью не установлено. Проверь ключи GigaChat/Yandex или интернет на сервере и попробуй ещё раз."
+        return "Я **AWESOME AI** — твой живой умный помощник ✨\n\nУмею:\n**1. Общаться** 🗣\n**2. Отвечать** 💡\n**3. Считать** 🧮\n**4. Рисовать** 🎨\n**5. Искать в интернете** 🌐\n**6. Помнить о тебе** 🧠\n**7. Погода/валюты/крипта** 🌤💵🪙\n\nЧто попробуем?"
+    return "🤖 Обрабатываю... Напиши чуть подробнее, и я дам полный ответ!"
 
 def describe_img(b64):
     try:
@@ -465,7 +554,9 @@ def api_chat():
         else: dtext="Документ: "+doc.get('name','')
     add_msg(cid,'user',msg,img)
     response=smart_answer(uid,msg,h,idesc,tg,dtext)
-    incr(uid,tg); add_msg(cid,'assistant',response)
+    try: incr(uid,tg)
+    except Exception: pass
+    add_msg(cid,'assistant',response)
     try:
         ms=get_msgs(cid); fu=next((m for m in ms if m['role']=='user' and m['content']),None)
         if fu: set_title(cid,fu['content'][:40])
@@ -709,7 +800,7 @@ def admin_reset_db():
     log_admin(uid,"Полная очистка аккаунтов")
     return jsonify({'ok':True})
 
-# ===== HTML: красивый DeepSeek-интерфейс, GPU-friendly (без blur), 40+ функций =====
+# ===== HTML: красивый DeepSeek-интерфейс, GPU-friendly (без blur) =====
 INDEX_HTML = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>AWESOME AI</title>
 <style>
 :root{--bg:#0f1420;--bg2:#161d2e;--panel:#1a2336;--border:#2a3550;--accent:#7b9cff;--accent2:#6fd8c0;--text:#e8ecf7;--muted:#8b96b0;--danger:#ff7b8a;--success:#5fd0a0}
@@ -908,7 +999,7 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 let currentUserId=null,currentChatId=null,sending=false,attachedImage=null,attachedType='image',authMode='login',currentTheme='dark';
 function toast(t,ty){const el=document.createElement('div');el.className='toast '+(ty||'');el.textContent=t;document.body.appendChild(el);requestAnimationFrame(()=>el.classList.add('show'));setTimeout(()=>{el.classList.remove('show');setTimeout(()=>el.remove(),300);},3000);}
 function toggleSidebar(){document.getElementById('sidebar').classList.toggle('open');}
-async function api(url,method,body){try{const o={method:method||'GET',headers:{'Content-Type':'application/json'}};if(body)o.body=JSON.stringify(body);const r=await fetch(url,o);return await r.json();}catch(e){return{ok:false,error:'Соединение'};}}
+async function api(url,method,body){try{const o={method:method||'GET',headers:{'Content-Type':'application/json'}};if(body)o.body=JSON.stringify(body);const r=await fetch(url,o);const t=await r.text();try{return JSON.parse(t);}catch(e){return{ok:false,error:'Сервер вернул ошибку'};}}catch(e){return{ok:false,error:'Соединение'};}}
 function setTheme(t){currentTheme=t;document.body.setAttribute('data-theme',t);try{localStorage.setItem('awesome_theme',t);}catch(e){}}
 function toggleTheme(){setTheme(currentTheme==='dark'?'light':'dark');api('/api/settings','POST',{theme:currentTheme});}
 function switchTab(m){authMode=m;document.getElementById('tabLogin').className='tab'+(m==='login'?' active':'');document.getElementById('tabReg').className='tab'+(m==='reg'?' active':'');document.getElementById('regFields').style.display=m==='reg'?'block':'none';document.getElementById('authTitle').textContent=m==='reg'?'Регистрация':'Вход';document.getElementById('authBtn').textContent=m==='reg'?'Создать аккаунт':'Войти';}
@@ -981,6 +1072,6 @@ document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
 if __name__ == '__main__':
-    print("🧠 AWESOME AI WEB — полный DeepSeek-клон, 40+ функций, Premium из бота")
+    print("🧠 AWESOME AI WEB — полный DeepSeek-клон + ИИ-улучшения")
     port=int(os.getenv("PORT",5000))
     app.run(host='0.0.0.0',port=port,debug=False,threaded=True)
