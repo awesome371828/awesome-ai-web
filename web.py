@@ -1,11 +1,11 @@
 # ================= AWESOME AI — ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ =================
-# Все данные в Supabase. Код сам определяет структуру таблицы users.
+# Все данные в Supabase. Исправлен порядок: декораторы объявлены ДО роутов.
 import os, re, uuid, hashlib, io, base64, json
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote
 import requests
-from flask import Flask, request, jsonify, session, send_file, redirect
+from flask import Flask, request, jsonify, session, send_file
 
 # ============ КЛЮЧИ И НАСТРОЙКИ ============
 PORT = int(os.environ.get("PORT", "8080"))
@@ -23,7 +23,7 @@ OWNER_PASS = "qawsedrf2346"
 OWNER_NAME = "Сергей (владелец)"
 
 app = Flask(__name__)
-app.secret_key = "awesome-ai-self-healing-v1"
+app.secret_key = "awesome-ai-self-healing-v2"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(seconds=SESSION_TTL)
 _http = requests.Session()
 BOT = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
@@ -35,18 +35,33 @@ SB_HDR = {"apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANO
 def hash_pw(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
+# ============ ДЕКОРАТОРЫ (ОБЪЯВЛЕНЫ В САМОМ ВЕРХУ — ДО РОУТОВ) ============
+def login_required(f):
+    @wraps(f)
+    def wrap(*a, **k):
+        if not session.get("uid"):
+            return jsonify({"ok": False, "error": "Войдите в аккаунт"}), 401
+        return f(*a, **k)
+    return wrap
+
+def owner_required(f):
+    @wraps(f)
+    def wrap(*a, **k):
+        if str(session.get("uid")) != OWNER_TGID:
+            return jsonify({"ok": False, "error": "Доступ только владельцу"}), 403
+        return f(*a, **k)
+    return wrap
+
 # ============ SUPABASE: САМО-ОПРЕДЕЛЕНИЕ СТРУКТУРЫ users ============
 _ID_COLS = ["telegram_id", "user_id", "tg_id", "tgid", "chat_id"]
 
 def _guess_id_col(cols):
-    """Находит колонку с Telegram ID в списке колонок таблицы."""
     for c in _ID_COLS:
         if c in cols:
             return c
     return None
 
 def get_users_columns():
-    """Определяет реальные колонки таблицы users."""
     try:
         r = _http.get(f"{SB_URL}/rest/v1/users?select=*&limit=1", headers=SB_HDR, timeout=6)
         if r.status_code == 200 and r.json():
@@ -56,7 +71,6 @@ def get_users_columns():
     return []
 
 def find_user_by_tgid(tgid):
-    """Ищет пользователя, пробуя все возможные колонки ID."""
     cols = get_users_columns()
     for col in _ID_COLS:
         if col in cols:
@@ -70,10 +84,9 @@ def find_user_by_tgid(tgid):
     return None, None
 
 def get_user_col(tgid):
-    """Возвращает (пользователь, колонка_id)."""
     return find_user_by_tgid(tgid)
 
-# ============ РЕГИСТРАЦИЯ / ВХОД (само-адаптация под таблицу) ============
+# ============ РЕГИСТРАЦИЯ / ВХОД ============
 @app.route("/api/register", methods=["POST"])
 def register():
     try:
@@ -151,22 +164,6 @@ def me():
                     "status": {"premium": premium, "admin": admin, "role": role,
                                "owner": str(session["uid"]) == OWNER_TGID, "until": str(until or "")}})
 
-def login_required(f):
-    @wraps(f)
-    def wrap(*a, **k):
-        if not session.get("uid"):
-            return jsonify({"ok": False, "error": "Войдите в аккаунт"}), 401
-        return f(*a, **k)
-    return wrap
-
-def owner_required(f):
-    @wraps(f)
-    def wrap(*a, **k):
-        if str(session.get("uid")) != OWNER_TGID:
-            return jsonify({"ok": False, "error": "Доступ только владельцу"}), 403
-        return f(*a, **k)
-    return wrap
-
 @app.route("/api/force_owner", methods=["POST"])
 def force_owner():
     d = request.get_json(silent=True) or {}
@@ -187,7 +184,7 @@ def force_owner():
                        headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
     return jsonify({"ok": True, "message": "Пароль владельца сброшен"})
 
-# ============ ДИАГНОСТИКА (встроена прямо в сайт) ============
+# ============ ДИАГНОСТИКА ============
 @app.route("/api/diag")
 def diag():
     out = {}
@@ -271,10 +268,14 @@ def export_chat():
 @owner_required
 def admin_users():
     rows = _select("users", "select=*&order=created_at.desc&limit=1000") or []
-    return jsonify({"ok": True, "users": [{"id": r.get(rcol) if (rcol := _guess_id_col(list(r.keys()))) else r.get("user_id"),
-                                           "name": r.get("username") or r.get("name"),
-                                           "role": r.get("role", "user"),
-                                           "premium": r.get("premium", False)} for r in rows]})
+    res = []
+    for r in rows:
+        idcol = _guess_id_col(list(r.keys()))
+        res.append({"id": r.get(idcol) if idcol else r.get("user_id"),
+                    "name": r.get("username") or r.get("name"),
+                    "role": r.get("role", "user"),
+                    "premium": r.get("premium", False)})
+    return jsonify({"ok": True, "users": res})
 
 @app.route("/api/admin/reset_password", methods=["POST"])
 @owner_required
