@@ -1,5 +1,5 @@
-# ================= AWESOME AI — АДАПТИРОВАН ПОД ТВОЮ ТАБЛИЦУ users =================
-# Колонки: user_id, username, premium(0/1), is_admin, is_owner, premium_expires
+# ================= AWESOME AI — ПОЛНЫЙ ФРОНТЕНД + АВТОВХОД =================
+# Адаптировано под твою таблицу users (user_id, premium, is_admin, is_owner, password)
 import os, re, uuid, hashlib, io, base64, json
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, session, send_file
 
 # ============ КЛЮЧИ И НАСТРОЙКИ ============
 PORT = int(os.environ.get("PORT", "8080"))
-SESSION_TTL = 30 * 24 * 3600
+SESSION_TTL = 30 * 24 * 3600  # автовход 30 дней
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
@@ -23,8 +23,12 @@ OWNER_PASS = "qawsedrf2346"
 OWNER_NAME = "Сергей (владелец)"
 
 app = Flask(__name__)
-app.secret_key = "awesome-ai-adapted-table-v1"
+app.secret_key = "awesome-ai-full-frontend-v1"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(seconds=SESSION_TTL)
+# настройки cookie, чтобы вход НЕ сбрасывался после перезагрузки
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = False
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 _http = requests.Session()
 BOT = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
 
@@ -52,9 +56,7 @@ def owner_required(f):
         return f(*a, **k)
     return wrap
 
-# ============ SUPABASE: работа с твоей таблицей users ============
-_ID_COLS = ["user_id", "telegram_id", "tg_id", "tgid"]
-
+# ============ SUPABASE ============
 def get_users_columns():
     try:
         r = _http.get(f"{SB_URL}/rest/v1/users?select=*&limit=1", headers=SB_HDR, timeout=6)
@@ -65,7 +67,6 @@ def get_users_columns():
     return []
 
 def get_user_col(tgid):
-    """Ищет пользователя по user_id (твоя колонка). Возвращает (строка, имя_колонки)."""
     try:
         r = _http.get(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}&select=*",
                       headers=SB_HDR, timeout=6)
@@ -76,7 +77,6 @@ def get_user_col(tgid):
     return None, None
 
 def parse_status(u):
-    """Читает Premium/админ/владельца из твоих полей."""
     owner = bool(u.get("is_owner")) or str(u.get("user_id")) == OWNER_TGID
     admin = bool(u.get("is_admin")) or bool(u.get("admin"))
     premium = bool(u.get("premium")) or bool(u.get("is_premium"))
@@ -363,7 +363,7 @@ def admin_broadcast():
 def quick_answers(text):
     t = text.lower().strip()
     if any(w in t for w in ["привет", "здравств", "хай", "hello", "ку"]):
-        return "Привет! 👋 Я AWESOME AI. Умею: отвечать, считать, генерировать картинки, погоду, курсы валют, криптовалюты. Спрашивай!"
+        return "Привет! 👋 Я AWESOME AI. Спрашивай что угодно — отвечу, посчитаю, помогу!"
     if "погод" in t: return "Точный прогноз смотри на Яндекс.Погоде или Gismeteo ☁️"
     if "доллар" in t or "курс" in t or "валю" in t: return "Актуальные курсы валют — на ЦБ РФ (cbr.ru) 💱"
     if "битко" in t or "крипт" in t or "btc" in t: return "Цены на криптовалюту — на CoinGecko или Binance 🪙"
@@ -406,7 +406,7 @@ def smart_answer(msg):
     except Exception: pass
     return "Не удалось получить ответ от нейросети. Но я на связи! Спроси про погоду, курсы, крипту или математику."
 
-# ============ ГЛАВНАЯ ============
+# ============ ГЛАВНАЯ (проверяет сессию: если залогинен -> чат, иначе -> вход) ============
 @app.route("/")
 def index():
     return INDEX_HTML
@@ -420,39 +420,104 @@ INDEX_HTML = """<!DOCTYPE html>
 body{background:linear-gradient(135deg,#0f172a 0%,#1a2a4a 50%,#123a3a 100%);min-height:100vh;color:var(--text)}
 @keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
 @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
-@keyframes glow{0%,100%{box-shadow:0 0 0 rgba(127,156,255,0)}50%{box-shadow:0 0 30px rgba(127,156,255,.25)}}
-.card{background:var(--card);border-radius:22px;padding:36px 32px;width:100%;max-width:420px;
+.card{background:var(--card);border-radius:22px;padding:30px;width:100%;max-width:420px;
 box-shadow:0 20px 60px rgba(0,0,0,.5);animation:fadeUp .5s ease;text-align:center;margin:auto}
 .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .logo{font-size:34px;font-weight:800;background:linear-gradient(90deg,var(--ac1),var(--ac2));
 -webkit-background-clip:text;background-clip:text;color:transparent;animation:float 3s ease-in-out infinite}
 .sub{color:var(--muted);font-size:14px;margin:8px 0 24px}
-input{width:100%;background:var(--bg);border:1.5px solid #334155;border-radius:14px;padding:14px 16px;
+input,textarea{width:100%;background:var(--bg);border:1.5px solid #334155;border-radius:14px;padding:13px 16px;
 color:#fff;font-size:15px;outline:none;margin-bottom:12px;transition:border-color .2s}
-input:focus{border-color:var(--ac1)}
+input:focus,textarea:focus{border-color:var(--ac1)}
+textarea{resize:vertical;min-height:70px}
 .btn{width:100%;background:linear-gradient(90deg,var(--ac1),var(--ac2));color:#fff;border:none;border-radius:14px;
-padding:14px;font-size:16px;font-weight:600;cursor:pointer;transition:transform .15s,box-shadow .2s;animation:glow 3s ease-in-out infinite}
-.btn:hover{transform:translateY(-2px)}
-.btn.ghost{background:#334155;animation:none;margin-top:10px}
-.err{color:#f87171;font-size:13px;margin-top:10px;min-height:18px}
+padding:13px;font-size:15px;font-weight:600;cursor:pointer;transition:transform .15s,box-shadow .2s}
+.btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(127,156,255,.3)}
+.btn.ghost{background:#334155}
+.btn.small{width:auto;padding:8px 14px;font-size:13px;display:inline-block;margin:4px}
+.btn.danger{background:#ef4444}
+.err{color:#f87171;font-size:13px;margin-top:8px;min-height:18px}
 .hint{color:#64748b;font-size:12px;margin-top:16px}
-.diag{color:#6fd8c0;font-size:11px;margin-top:8px;cursor:pointer;text-decoration:underline}
 .name-field{display:none}
+.app{display:none;max-width:900px;margin:0 auto;padding:14px}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.topbar .user{font-size:15px}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.tab{background:#1e293b;border:none;color:var(--text);padding:8px 16px;border-radius:20px;cursor:pointer}
+.tab.active{background:linear-gradient(90deg,var(--ac1),var(--ac2));color:#fff}
+.chatbox{max-height:55vh;overflow-y:auto;margin-bottom:10px;padding:10px}
+.msg{animation:fadeUp .3s ease;padding:12px;border-radius:12px;margin:6px 0;max-width:85%;white-space:pre-wrap}
+.msg.user{background:linear-gradient(90deg,var(--ac1),var(--ac2));margin-left:auto;color:#fff}
+.msg.ai{background:#334155;margin-right:auto}
+.chat-item{background:#1e293b;border-radius:12px;padding:12px;margin:8px 0;cursor:pointer;transition:transform .15s}
+.chat-item:hover{transform:translateX(4px)}
+.diag{color:#6fd8c0;font-size:11px;margin-top:8px;cursor:pointer;text-decoration:underline}
+#adminTab{display:none}
+.admin-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap;background:#0f172a;border-radius:10px;padding:8px}
+.admin-row span{flex:1;font-size:13px}
 </style></head><body>
-<div class="wrap"><div class="card">
-  <div class="logo">✨ AWESOME AI</div>
-  <div class="sub" id="sub">Вход в аккаунт</div>
-  <div class="name-field" id="nameWrap"><input id="authName" placeholder="Название (имя)"></div>
-  <input id="authTg" placeholder="Telegram ID">
-  <input id="authPass" type="password" placeholder="Пароль">
-  <button class="btn" id="authBtn" onclick="doAuth()">Войти</button>
-  <button class="btn ghost" onclick="toggleMode()">Нет аккаунта? Зарегистрироваться</button>
-  <div class="err" id="err"></div>
-  <div class="hint">AWESOME AI · вход по Telegram ID</div>
-  <div class="diag" onclick="showDiag()">🔍 Диагностика</div>
-</div></div>
+
+<!-- ЭКРАН ВХОДА -->
+<div class="wrap" id="authScreen">
+  <div class="card">
+    <div class="logo">✨ AWESOME AI</div>
+    <div class="sub" id="sub">Вход в аккаунт</div>
+    <div class="name-field" id="nameWrap"><input id="authName" placeholder="Название (имя)"></div>
+    <input id="authTg" placeholder="Telegram ID">
+    <input id="authPass" type="password" placeholder="Пароль">
+    <button class="btn" id="authBtn" onclick="doAuth()">Войти</button>
+    <button class="btn ghost" style="margin-top:10px" onclick="toggleMode()">Нет аккаунта? Зарегистрироваться</button>
+    <div class="err" id="err"></div>
+    <div class="hint">AWESOME AI · вход по Telegram ID</div>
+    <div class="diag" onclick="showDiag()">🔍 Диагностика</div>
+  </div>
+</div>
+
+<!-- ОСНОВНОЕ ПРИЛОЖЕНИЕ -->
+<div class="app" id="app">
+  <div class="topbar">
+    <span class="logo" style="font-size:22px">✨ AWESOME AI</span>
+    <span class="user" id="userInfo"></span>
+  </div>
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('chat')">💬 Чат</button>
+    <button class="tab" onclick="showTab('chats')">📁 Мои чаты</button>
+    <button class="tab" id="adminTab" onclick="showTab('admin')">⚙️ Админ</button>
+    <button class="tab" onclick="logout()">🚪 Выйти</button>
+  </div>
+
+  <div id="tab-chat">
+    <div class="chatbox" id="chatBox"><div class="msg ai">Привет! 👋 Напиши мне что-нибудь — отвечу быстро.</div></div>
+    <textarea id="chatInput" placeholder="Напишите сообщение..."></textarea>
+    <div style="display:flex;gap:8px">
+      <button class="btn" onclick="sendChat()">✈ Отправить</button>
+      <button class="btn ghost small" onclick="newChat()">Новый чат</button>
+    </div>
+  </div>
+
+  <div id="tab-chats" style="display:none">
+    <div id="chatList"></div>
+  </div>
+
+  <div id="tab-admin" style="display:none">
+    <h3>⚙️ Панель владельца</h3>
+    <input id="admTg" placeholder="Telegram ID пользователя">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input id="admDays" placeholder="Дни" type="number" style="width:80px">
+      <input id="admHours" placeholder="Часы" type="number" style="width:80px">
+      <input id="admMin" placeholder="Минуты" type="number" style="width:80px">
+    </div>
+    <button class="btn small" onclick="admGive()">Выдать Premium</button>
+    <button class="btn small danger" onclick="admRemove()">Снять Premium</button>
+    <input id="admPass" placeholder="Новый пароль (для сброса)">
+    <button class="btn small" onclick="admResetPass()">Сбросить пароль</button>
+    <button class="btn small danger" onclick="admDelete()">Удалить аккаунт</button>
+    <div id="adminList"></div>
+  </div>
+</div>
+
 <script>
-let isReg=false;
+let isReg=false, curChat="", me=null;
 function toggleMode(){
  isReg=!isReg;
  document.getElementById('nameWrap').style.display=isReg?'block':'none';
@@ -461,10 +526,9 @@ function toggleMode(){
  document.querySelector('.ghost').textContent=isReg?'Уже есть аккаунт? Войти':'Нет аккаунта? Зарегистрироваться';
 }
 async function showDiag(){
- try{
-  const r=await fetch('/api/diag');const d=await r.json();
-  document.getElementById('err').innerHTML='<b>Диагностика:</b><br>'+JSON.stringify(d);
- }catch(e){document.getElementById('err').textContent='Не удалось получить диагностику';}
+ try{const r=await fetch('/api/diag');const d=await r.json();
+ document.getElementById('err').innerHTML='<b>Диагностика:</b><br>'+JSON.stringify(d);
+ }catch(e){document.getElementById('err').textContent='Ошибка диагностики';}
 }
 async function doAuth(){
  const name=document.getElementById('authName').value.trim();
@@ -478,17 +542,100 @@ async function doAuth(){
  const body=isReg?{name,telegram_id:tg,password:pw}:{telegram_id:tg,password:pw};
  try{
   const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  let d;try{d=await r.json();}catch(e){document.getElementById('err').textContent='Сервер не отвечает. Ещё раз.';reset();return;}
+  let d;try{d=await r.json();}catch(e){document.getElementById('err').textContent='Сервер не отвечает';reset();return;}
   if(!d.ok){document.getElementById('err').textContent=d.error||'Ошибка';reset();return;}
-  document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-size:22px;color:var(--text)">✅ Вход выполнен! Обновляем...</div>';
-  location.reload();
- }catch(e){document.getElementById('err').textContent='Ошибка сети.';reset();}
+  enterApp(d); // сразу входим в приложение, без перезагрузки
+ }catch(e){document.getElementById('err').textContent='Ошибка сети';reset();}
 }
 function reset(){const b=document.getElementById('authBtn');b.textContent=isReg?'Создать аккаунт':'Войти';b.disabled=false;}
+async function enterApp(d){
+ me={uid:d.uid,name:d.name};
+ document.getElementById('authScreen').style.display='none';
+ document.getElementById('app').style.display='block';
+ document.getElementById('userInfo').textContent=me.name;
+ const m=await fetch('/api/me');const md=await m.json();
+ if(md.ok){
+   me=md;
+   document.getElementById('userInfo').textContent=me.name+' · '+me.status.role;
+   if(me.status.owner)document.getElementById('adminTab').style.display='block';
+ }
+ showTab('chat');
+}
+async function init(){
+ // при загрузке проверяем сессию
+ try{
+  const r=await fetch('/api/me');
+  if(r.ok){const d=await r.json(); if(d.ok){enterApp({uid:d.uid,name:d.name}); return;}}
+ }catch(e){}
+ // не залогинен — показываем вход
+ document.getElementById('authScreen').style.display='flex';
+}
+function showTab(t){
+ document.getElementById('tab-chat').style.display=t==='chat'?'block':'none';
+ document.getElementById('tab-chats').style.display=t==='chats'?'block':'none';
+ document.getElementById('tab-admin').style.display=t==='admin'?'block':'none';
+ document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+ if(t==='chats')loadChats(); if(t==='admin')loadAdmin();
+}
+async function sendChat(){
+ const msg=document.getElementById('chatInput').value.trim(); if(!msg)return;
+ const box=document.getElementById('chatBox');
+ box.innerHTML+='<div class="msg user">'+msg.replace(/</g,'&lt;')+'</div>';
+ document.getElementById('chatInput').value='';
+ box.innerHTML+='<div class="msg ai">⏳ Думаю...</div>';box.scrollTop=box.scrollHeight;
+ const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:curChat,message:msg})});
+ const d=await r.json();
+ const typing=box.querySelector('.msg.ai:last-child');
+ if(typing)typing.textContent=d.answer||'Ошибка'; else box.innerHTML+='<div class="msg ai">'+(d.answer||'Ошибка')+'</div>';
+ curChat=d.chat_id;box.scrollTop=box.scrollHeight;
+}
+function newChat(){curChat='';document.getElementById('chatBox').innerHTML='<div class="msg ai">Привет! 👋 Напиши мне что-нибудь.</div>';}
+async function loadChats(){
+ const r=await fetch('/api/chats');const d=await r.json();const el=document.getElementById('chatList');el.innerHTML='';
+ if(!d.chats.length){el.innerHTML='<p style="color:var(--muted)">Пока нет чатов. Начни диалог во вкладке «Чат».</p>';return;}
+ d.chats.forEach(c=>{const div=document.createElement('div');div.className='chat-item';
+ div.textContent=(c.pinned?'📌 ':'')+c.title;
+ div.onclick=()=>{curChat=c.id;showTab('chat');loadMsgs();};el.appendChild(div);});
+}
+async function loadMsgs(){
+ const r=await fetch('/api/messages?chat_id='+curChat);const d=await r.json();const box=document.getElementById('chatBox');
+ box.innerHTML='';d.messages.forEach(m=>{box.innerHTML+='<div class="msg '+(m.role==='user'?'user':'ai')+'">'+m.content.replace(/</g,'&lt;')+'</div>';});
+ box.scrollTop=box.scrollHeight;
+}
+async function loadAdmin(){
+ const r=await fetch('/api/admin/users');const d=await r.json();const el=document.getElementById('adminList');el.innerHTML='';
+ if(!d.ok){el.innerHTML='<p style="color:var(--muted)">'+d.error+'</p>';return;}
+ d.users.forEach(u=>{const row=document.createElement('div');row.className='admin-row';
+ row.innerHTML='<span>'+u.name+' (ID: '+u.id+') — '+u.role+(u.premium?' 💎':'')+'</span>';
+ el.appendChild(row);});
+}
+async function admGive(){
+ const r=await fetch('/api/admin/give_premium',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({telegram_id:admTg.value.trim(),days:+admDays.value||0,hours:+admHours.value||0,minutes:+admMin.value||0})});
+ alert((await r.json()).ok?'Premium выдан':'Ошибка');
+}
+async function admRemove(){
+ const r=await fetch('/api/admin/remove_premium',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({telegram_id:admTg.value.trim()})});
+ alert((await r.json()).ok?'Premium снят':'Ошибка');
+}
+async function admResetPass(){
+ const r=await fetch('/api/admin/reset_password',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({telegram_id:admTg.value.trim(),password:admPass.value.trim()})});
+ alert((await r.json()).ok?'Пароль сброшен':'Ошибка');
+}
+async function admDelete(){
+ if(!confirm('Удалить аккаунт?'))return;
+ const r=await fetch('/api/admin/delete_user',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({telegram_id:admTg.value.trim()})});
+ alert((await r.json()).ok?'Удалено':'Ошибка');
+}
+async function logout(){await fetch('/api/logout',{method:'POST'});location.reload();}
+init();
 </script></body></html>"""
 
 if __name__ == "__main__":
-    # создаём владельца при старте под твою таблицу
+    # создаём владельца при старте
     try:
         u, _ = get_user_col(OWNER_TGID)
         if not u:
