@@ -65,43 +65,56 @@ def is_owner(uid=None, tg=None):
 
 def init_db():
     conn=get_db(); cur=conn.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users(
+    # 1) Таблицы (каждая команда изолирована, чтобы сбой одной не убивал остальные)
+    def ex(sql, args=None):
+        try:
+            cur.execute(sql, args or ())
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    ex("""CREATE TABLE IF NOT EXISTS users(
         user_id TEXT PRIMARY KEY, name TEXT, password TEXT, telegram_id TEXT,
         premium INTEGER DEFAULT 0, messages_today INTEGER DEFAULT 0, last_reset TEXT,
         premium_expires TEXT, is_admin INTEGER DEFAULT 0, is_owner INTEGER DEFAULT 0,
         theme TEXT DEFAULT 'dark', joined_at TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
         avatar TEXT DEFAULT '', ref_code TEXT, ref_count INTEGER DEFAULT 0)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS chats_web(id BIGSERIAL PRIMARY KEY, user_id TEXT,
+    ex("""CREATE TABLE IF NOT EXISTS chats_web(id BIGSERIAL PRIMARY KEY, user_id TEXT,
         title TEXT DEFAULT 'Новый чат', created_at TEXT, pinned INTEGER DEFAULT 0)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS messages_web(id BIGSERIAL PRIMARY KEY, chat_id BIGINT,
+    ex("""CREATE TABLE IF NOT EXISTS messages_web(id BIGSERIAL PRIMARY KEY, chat_id BIGINT,
         role TEXT, content TEXT, image TEXT, created_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS total_stats_web(user_id TEXT PRIMARY KEY, total_messages INTEGER DEFAULT 0)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS shared_chats(id TEXT PRIMARY KEY, chat_id BIGINT, created_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS admin_log(id BIGSERIAL PRIMARY KEY, admin_id TEXT, action TEXT, created_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS notifications(id BIGSERIAL PRIMARY KEY, user_id TEXT, text TEXT, read INTEGER DEFAULT 0, created_at TEXT)""")
-    # ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (факты, предпочтения) — как в ChatGPT
-    cur.execute("""CREATE TABLE IF NOT EXISTS user_memory(id BIGSERIAL PRIMARY KEY, user_id TEXT,
+    ex("""CREATE TABLE IF NOT EXISTS total_stats_web(user_id TEXT PRIMARY KEY, total_messages INTEGER DEFAULT 0)""")
+    ex("""CREATE TABLE IF NOT EXISTS shared_chats(id TEXT PRIMARY KEY, chat_id BIGINT, created_at TEXT)""")
+    ex("""CREATE TABLE IF NOT EXISTS admin_log(id BIGSERIAL PRIMARY KEY, admin_id TEXT, action TEXT, created_at TEXT)""")
+    ex("""CREATE TABLE IF NOT EXISTS notifications(id BIGSERIAL PRIMARY KEY, user_id TEXT, text TEXT, read INTEGER DEFAULT 0, created_at TEXT)""")
+    ex("""CREATE TABLE IF NOT EXISTS user_memory(id BIGSERIAL PRIMARY KEY, user_id TEXT,
         fact TEXT, source TEXT DEFAULT 'auto', created_at TEXT)""")
+    # 2) Доп. колонки (с защитой)
     for col in ['xp','level','avatar','ref_code','ref_count','telegram_id','name','password']:
-        try: cur.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
-        except: pass
-    # Если колонка xp была TEXT — привести к INTEGER (чинит баг xp+5)
+        ex(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
+    ex("ALTER TABLE chats_web ADD COLUMN IF NOT EXISTS pinned INTEGER DEFAULT 0")
+    ex("ALTER TABLE messages_web ADD COLUMN IF NOT EXISTS image TEXT")
+    # 3) Конвертация xp в INTEGER — ТОЛЬКО если это TEXT, и строго изолированно.
+    #    Если в данных есть «мусор» (не-числа) — не падаем, а чистим их.
     try:
         cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='xp'")
         row=cur.fetchone()
         if row and row[0]=='text':
+            cur.execute("UPDATE users SET xp='0' WHERE xp IS NULL OR xp='' OR xp !~ '^[0-9]+$'")
             cur.execute("ALTER TABLE users ALTER COLUMN xp TYPE INTEGER USING (CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)")
-    except Exception: pass
-    try: cur.execute("ALTER TABLE chats_web ADD COLUMN IF NOT EXISTS pinned INTEGER DEFAULT 0")
-    except: pass
-    try: cur.execute("ALTER TABLE messages_web ADD COLUMN IF NOT EXISTS image TEXT")
-    except: pass
-    cur.execute("SELECT password FROM users WHERE user_id=%s",(str(OWNER_ID),))
-    if not cur.fetchone():
-        cur.execute("INSERT INTO users(user_id,name,password,telegram_id,messages_today,last_reset,is_owner,theme,joined_at) VALUES(%s,%s,%s,%s,0,%s,1,'dark',%s)",
-                    (str(OWNER_ID),'AWESOME',hash_pw('qawsedrf2346'),str(OWNER_ID),gm().strftime('%Y-%m-%d'),now_iso()))
-        cur.execute("INSERT INTO total_stats_web(user_id,total_messages) VALUES(%s,0) ON CONFLICT DO NOTHING",(str(OWNER_ID),))
-    conn.commit(); cur.close(); conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()   # критично: если конвертация упала — транзакция не должна «убить» приложение
+    # 4) Владелец создаётся/восстанавливается всегда, пароль НЕ перезаписывается
+    try:
+        cur.execute("SELECT password FROM users WHERE user_id=%s",(str(OWNER_ID),))
+        if not cur.fetchone():
+            cur.execute("INSERT INTO users(user_id,name,password,telegram_id,messages_today,last_reset,is_owner,theme,joined_at) VALUES(%s,%s,%s,%s,0,%s,1,'dark',%s)",
+                        (str(OWNER_ID),'AWESOME',hash_pw('qawsedrf2346'),str(OWNER_ID),gm().strftime('%Y-%m-%d'),now_iso()))
+            cur.execute("INSERT INTO total_stats_web(user_id,total_messages) VALUES(%s,0) ON CONFLICT DO NOTHING",(str(OWNER_ID),))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    cur.close(); conn.close()
 init_db()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if HAS_SUPABASE else None
 
