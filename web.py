@@ -1,5 +1,5 @@
-# ================= AWESOME AI — МИНИМАЛЬНО НАДЁЖНЫЙ (inline onclick) =================
-import os, re, uuid, hashlib, io
+# ============ AWESOME AI — ПОЛНАЯ КОПИЯ DeepSeek ============
+import os, re, uuid, hashlib, io, json
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote
@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify, session, send_file
 
 PORT = int(os.environ.get("PORT", "8080"))
 SESSION_TTL = 30 * 24 * 3600
+
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
 GIGACHAT_AUTH_KEY = "MDFhMDBkNmEtMmExNC03M2JkLWFlZmMtOTQ0OWVlOTc5M2U1OmE1ZWJhM2NlLTQwYjAtNDZlYi1iMmY2LTE3OTFmYzhhYTQ2MA=="
@@ -19,7 +20,7 @@ OWNER_PASS = "qawsedrf2346"
 OWNER_NAME = "Сергей (владелец)"
 
 app = Flask(__name__)
-app.secret_key = "awesome-ai-inline-v1"
+app.secret_key = "awesome-ai-full-deepseek"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(seconds=SESSION_TTL)
 _http = requests.Session()
 BOT = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
@@ -32,19 +33,18 @@ def hash_pw(p): return hashlib.sha256(p.encode()).hexdigest()
 def login_required(f):
     @wraps(f)
     def wrap(*a, **k):
-        if not session.get("uid"):
-            return jsonify({"ok": False, "error": "Войдите"}), 401
+        if not session.get("uid"): return jsonify({"ok": False, "error": "Войдите"}), 401
         return f(*a, **k)
     return wrap
 
 def owner_required(f):
     @wraps(f)
     def wrap(*a, **k):
-        if str(session.get("uid")) != OWNER_TGID:
-            return jsonify({"ok": False, "error": "Только владелец"}), 403
+        if str(session.get("uid")) != OWNER_TGID: return jsonify({"ok": False, "error": "Только владелец"}), 403
         return f(*a, **k)
     return wrap
 
+# --- Supabase helpers ---
 def get_users_columns():
     try:
         r = _http.get(f"{SB_URL}/rest/v1/users?select=*&limit=1", headers=SB_HDR, timeout=6)
@@ -66,15 +66,14 @@ def parse_status(u):
     until = u.get("premium_expires") or u.get("premium_until")
     if until:
         try:
-            if datetime.fromisoformat(str(until).replace("Z", "+00:00")) < datetime.now(timezone.utc):
-                premium = False
+            if datetime.fromisoformat(str(until).replace("Z","+00:00")) < datetime.now(timezone.utc): premium = False
         except Exception: pass
     role = "owner" if owner else ("admin" if admin else ("premium" if premium else "user"))
     return {"premium": premium, "until": str(until or ""), "admin": admin, "role": role, "owner": owner}
 
 def _insert(t, d):
     try:
-        r = _http.post(f"{SB_URL}/rest/v1/{t}", json=d, headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
+        r = _http.post(f"{SB_URL}/rest/v1/{t}", json=d, headers={**SB_HDR, "Prefer":"return=minimal"}, timeout=6)
         return r.status_code in (200, 201, 204)
     except Exception: return False
 
@@ -124,7 +123,7 @@ def login():
         tgid = str(d.get("telegram_id","")).strip(); pwd = str(d.get("password","")).strip()
         if not tgid or not pwd: return jsonify({"ok": False, "error": "Заполни оба поля"})
         u = get_user(tgid)
-        if not u: return jsonify({"ok": False, "error": "Аккаунт не найден — зарегистрируйся"})
+        if not u: return jsonify({"ok": False, "error": "Аккаунт не найден"})
         db_pw = u.get("password") or u.get("pwd") or ""
         if str(tgid)==OWNER_TGID and (not db_pw or db_pw==hash_pw(OWNER_PASS)): db_pw = hash_pw(OWNER_PASS)
         if hash_pw(pwd) != db_pw: return jsonify({"ok": False, "error": "Неверный пароль"})
@@ -151,23 +150,39 @@ def diag():
         r = _http.get(f"{SB_URL}/rest/v1/users?select=*&limit=1", headers=SB_HDR, timeout=6)
         out["users_status"] = r.status_code; out["users_body"] = r.text[:400]
     except Exception as e: out["users_error"] = str(e)
+    # проверим таблицы чата
+    try:
+        r = _http.get(f"{SB_URL}/rest/v1/chats_web?select=*&limit=1", headers=SB_HDR, timeout=6)
+        out["chats_status"] = r.status_code
+    except Exception as e: out["chats_error"] = str(e)
+    try:
+        r = _http.get(f"{SB_URL}/rest/v1/messages_web?select=*&limit=1", headers=SB_HDR, timeout=6)
+        out["messages_status"] = r.status_code
+    except Exception as e: out["messages_error"] = str(e)
     return jsonify(out)
 
-# ============ ИИ ============
-def smart_answer(msg):
-    t = msg.lower().strip()
+# ============ ИИ (DeepSeek-стиль, быстрый) ============
+def quick_answers(text):
+    t = text.lower().strip()
     if any(w in t for w in ["привет","здравств","хай","hello","ку"]):
-        return "Привет! 👋 Я AWESOME AI. Спрашивай что угодно!"
+        return "Привет! 👋 Я AWESOME AI. Умею: отвечать, считать, генерировать картинки, погоду, курсы валют, криптовалюты, стихи, идеи. Спрашивай!"
     if "погод" in t: return "Прогноз смотри на Яндекс.Погоде или Gismeteo ☁️"
-    if "доллар" in t or "курс" in t: return "Курсы валют — на ЦБ РФ (cbr.ru) 💱"
-    if "битко" in t or "крипт" in t: return "Цены на крипту — на CoinGecko или Binance 🪙"
-    if "кто ты" in t or "ты кто" in t: return "Я AWESOME AI — умный помощник ✨"
+    if "доллар" in t or "курс" in t or "валю" in t: return "Курсы валют — на ЦБ РФ (cbr.ru) 💱"
+    if "битко" in t or "крипт" in t or "btc" in t: return "Цены на крипту — на CoinGecko или Binance 🪙"
+    if "кто ты" in t or "ты кто" in t or "что умеешь" in t: return "Я AWESOME AI ✨ — аналог DeepSeek/ChatGPT/Grok. Отвечаю, считаю, рисую, помогаю с идеями."
     if "спасибо" in t: return "Всегда пожалуйста! 😊"
+    if "пока" in t: return "Пока! Возвращайся 👋"
+    if "стих" in t: return "Вот тебе: ✨\nВ мире тёплых слов и света,\nЯ всегда с тобой в ответе. 💫"
     if re.search(r"[0-9]+\s*[+\-*/]\s*[0-9]+", t):
         try:
             res = eval(re.search(r"[0-9+\-*/().\s]+", t).group().strip())
             return f"Результат: {res} 🧮"
         except Exception: return "Напиши, например: 2+2*3"
+    return None
+
+def smart_answer(msg):
+    q = quick_answers(msg)
+    if q: return q
     try:
         r = _http.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth", data={"scope":"GIGACHAT_API_PERS"},
                        headers={"Authorization":"Basic "+GIGACHAT_AUTH_KEY,"RqUID":str(uuid.uuid4()),
@@ -180,7 +195,16 @@ def smart_answer(msg):
             ans = r.json()["choices"][0]["message"]["content"]
             if ans and len(ans.strip())>1: return ans.strip()
     except Exception: pass
-    return "Не удалось получить ответ от нейросети. Но я на связи! Спроси про погоду, курсы или математику."
+    try:
+        r = _http.post("https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
+                       json={"modelUri":f"gpt://{FOLDER_ID}/yandexgpt-lite",
+                             "completionOptions":{"temperature":0.6,"maxTokens":700},
+                             "messages":[{"role":"user","text":msg}]},
+                       headers={"Authorization":"Api-Key "+YANDEX_API_KEY,"Content-Type":"application/json"}, timeout=25)
+        ans = r.json()["result"]["alternatives"][0]["message"]["text"]
+        if ans and len(ans.strip())>1: return ans.strip()
+    except Exception: pass
+    return "Не удалось получить ответ от нейросети. Но я на связи! Спроси про погоду, курсы, математику или попроси стих."
 
 # ============ ЧАТ ============
 @app.route("/api/chat", methods=["POST"])
@@ -188,14 +212,18 @@ def smart_answer(msg):
 def api_chat():
     d = request.get_json(silent=True) or {}
     chat_id = str(d.get("chat_id","")); msg = str(d.get("message","")).strip()
-    if not msg: return jsonify({"ok": False, "error": "Пустое"})
-    if not chat_id:
-        chat_id = uuid.uuid4().hex[:10]
-        _insert("chats_web", {"user_id": session["uid"], "chat_id": chat_id, "title": msg[:30]})
-    _insert("messages_web", {"chat_id": chat_id, "role":"user", "content": msg})
-    ans = smart_answer(msg)
-    _insert("messages_web", {"chat_id": chat_id, "role":"assistant", "content": ans})
-    return jsonify({"ok": True, "answer": ans, "chat_id": chat_id})
+    if not msg: return jsonify({"ok": False, "error": "Пустое сообщение"})
+    try:
+        if not chat_id:
+            chat_id = uuid.uuid4().hex[:10]
+            _insert("chats_web", {"user_id": session["uid"], "chat_id": chat_id, "title": msg[:30]})
+        _insert("messages_web", {"chat_id": chat_id, "role":"user", "content": msg})
+        ans = smart_answer(msg)
+        _insert("messages_web", {"chat_id": chat_id, "role":"assistant", "content": ans})
+        return jsonify({"ok": True, "answer": ans, "chat_id": chat_id})
+    except Exception as e:
+        # если таблицы чата нет — всё равно отвечаем (без сохранения)
+        return jsonify({"ok": True, "answer": smart_answer(msg), "chat_id": chat_id or uuid.uuid4().hex[:10], "warn": str(e)})
 
 @app.route("/api/chats")
 @login_required
@@ -224,11 +252,20 @@ def gen_image():
     prompt = str((request.get_json(silent=True) or {}).get("prompt","")).strip() or "abstract art"
     return jsonify({"ok": True, "url": f"https://image.pollinations.ai/prompt/{quote(prompt)}"})
 
+@app.route("/api/export")
+@login_required
+def export_chat():
+    chat_id = request.args.get("chat_id","")
+    rows = _select("messages_web", f"chat_id=eq.{chat_id}&select=*&order=id.asc") or []
+    text = "\n\n".join(f"{'Вы' if r.get('role')=='user' else 'AI'}:\n{r.get('content')}" for r in rows)
+    return send_file(io.BytesIO(text.encode("utf-8")), as_attachment=True, download_name="chat.txt", mimetype="text/plain")
+
 @app.route("/api/profile")
 @login_required
 def profile():
     u = get_user(session["uid"]) or {}
-    return jsonify({"ok": True, "name": u.get("username",""), "xp": u.get("xp",0), "level": u.get("level",1)})
+    st = parse_status(u)
+    return jsonify({"ok": True, "name": u.get("username",""), "role": st["role"], "xp": u.get("xp",0), "level": u.get("level",1)})
 
 # ============ АДМИН ============
 @app.route("/api/admin/users")
@@ -306,7 +343,7 @@ def admin_broadcast():
             except Exception: pass
     return jsonify({"ok": True, "sent": sent})
 
-# ============ ГЛАВНАЯ (inline onclick — НЕ МОГУТ сломаться) ============
+# ============ ГЛАВНАЯ (всё на одной странице, надёжные onclick) ============
 @app.route("/")
 def index():
     return INDEX_HTML
@@ -325,104 +362,55 @@ body{background:linear-gradient(135deg,#0f172a 0%,#1a2a4a 50%,#123a3a 100%);min-
 .wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .logo{font-size:34px;font-weight:800;background:linear-gradient(90deg,var(--ac1),var(--ac2));-webkit-background-clip:text;background-clip:text;color:transparent;animation:float 3s ease-in-out infinite}
 .sub{color:var(--muted);font-size:14px;margin:8px 0 20px}
-input{width:100%;background:var(--bg);border:1.5px solid #334155;border-radius:14px;padding:13px 16px;color:#fff;font-size:15px;outline:none;margin-bottom:12px}
-input:focus{border-color:var(--ac1)}
+input,textarea{width:100%;background:var(--bg);border:1.5px solid #334155;border-radius:14px;padding:13px 16px;color:#fff;font-size:15px;outline:none;margin-bottom:12px}
+input:focus,textarea:focus{border-color:var(--ac1)}
+textarea{resize:vertical;min-height:70px}
 .btn{width:100%;background:linear-gradient(90deg,var(--ac1),var(--ac2));color:#fff;border:none;border-radius:14px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;margin-top:6px;animation:glow 3s ease-in-out infinite}
 .btn:hover{transform:translateY(-2px)}
 .btn.ghost{background:#334155;animation:none}
-.err{color:#f87171;font-size:13px;margin-top:10px;min-height:18px;word-break:break-word}
+.btn.small{width:auto;padding:9px 16px;font-size:13px;display:inline-block;margin:4px}
+.btn.danger{background:#ef4444}
+.err{color:#f87171;font-size:13px;margin-top:10px;min-height:18px;word-break:break-word;text-align:left}
 .hint{color:#64748b;font-size:12px;margin-top:14px}
 .diag{color:#6fd8c0;font-size:11px;margin-top:8px;cursor:pointer;text-decoration:underline}
 #nameWrap{display:none}
-</style></head><body>
-<div class="wrap"><div class="card">
-  <div class="logo">✨ AWESOME AI</div>
-  <div class="sub" id="sub">Вход в аккаунт</div>
-  <div id="nameWrap"><input id="authName" placeholder="Название (имя)"></div>
-  <input id="authTg" placeholder="Telegram ID">
-  <input id="authPass" type="password" placeholder="Пароль">
-  <button class="btn" id="authBtn" onclick="doAuth()">Войти</button>
-  <button class="btn ghost" id="toggleBtn" onclick="toggleMode()">Нет аккаунта? Зарегистрироваться</button>
-  <div class="err" id="err"></div>
-  <div class="hint">AWESOME AI · вход по Telegram ID</div>
-  <div class="diag" id="diagLink" onclick="doDiag()">🔍 Диагностика</div>
-</div></div>
-
-<script>
-// ГЛОБАЛЬНЫЕ функции — всегда доступны, не зависят от порядка привязки
-var isReg=false;
-function toggleMode(){
-  isReg=!isReg;
-  document.getElementById('nameWrap').style.display=isReg?'block':'none';
-  document.getElementById('authBtn').textContent=isReg?'Создать аккаунт':'Войти';
-  document.getElementById('sub').textContent=isReg?'Регистрация':'Вход в аккаунт';
-  document.getElementById('toggleBtn').textContent=isReg?'Уже есть аккаунт? Войти':'Нет аккаунта? Зарегистрироваться';
-}
-function showErr(msg){ document.getElementById('err').innerHTML=msg; }
-async function doDiag(){
-  showErr('⏳ Загрузка диагностики...');
-  try{
-    var r=await fetch('/api/diag'); var d=await r.json();
-    showErr('<b>Диагностика:</b><br>'+JSON.stringify(d));
-  }catch(e){ showErr('Ошибка: '+e.message); }
-}
-async function doAuth(){
-  var name=document.getElementById('authName').value.trim();
-  var tg=document.getElementById('authTg').value.trim();
-  var pw=document.getElementById('authPass').value.trim();
-  showErr('');
-  if(!tg||!pw){ showErr('Заполни Telegram ID и пароль'); return; }
-  if(isReg&&!name){ showErr('Заполни название'); return; }
-  var b=document.getElementById('authBtn');
-  b.textContent='⏳ Проверка...'; b.disabled=true;
-  try{
-    var url=isReg?'/api/register':'/api/login';
-    var body=isReg?{name:name,telegram_id:tg,password:pw}:{telegram_id:tg,password:pw};
-    var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    var d=await r.json();
-    if(!d.ok){ showErr(d.error||'Ошибка'); b.textContent=isReg?'Создать аккаунт':'Войти'; b.disabled=false; return; }
-    showErr('✅ Вход выполнен!');
-    setTimeout(function(){ location.reload(); }, 800);
-  }catch(e){ showErr('Ошибка сети: '+e.message); b.textContent=isReg?'Создать аккаунт':'Войти'; b.disabled=false; }
-}
-// проверка сессии
-fetch('/api/me').then(function(r){return r.json();}).then(function(d){
-  if(d.ok){ window.location.href='/app'; }
-}).catch(function(){});
-</script></body></html>"""
-
-# Второй маршрут — приложение (после входа)
-@app.route("/app")
-def app_page():
-    return APP_HTML
-
-APP_HTML = """<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AWESOME AI</title>
-<style>
-:root{--ac1:#7b9cff;--ac2:#6fd8c0;--text:#e2e8f0;--card:#1e293b;--bg:#0f172a}
-*{box-sizing:border-box;margin:0;padding:0;font-family:'Segoe UI',system-ui,sans-serif}
-body{background:linear-gradient(135deg,#0f172a 0%,#1a2a4a 50%,#123a3a 100%);min-height:100vh;color:var(--text)}
-.app{max-width:950px;margin:0 auto;padding:14px}
-.logo{font-size:22px;font-weight:800;background:linear-gradient(90deg,var(--ac1),var(--ac2));-webkit-background-clip:text;background-clip:text;color:transparent}
-.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+#app{display:none;max-width:950px;margin:0 auto;padding:14px}
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
 .tab{background:#1e293b;border:none;color:var(--text);padding:8px 16px;border-radius:20px;cursor:pointer}
 .tab.active{background:linear-gradient(90deg,var(--ac1),var(--ac2));color:#fff}
 .chatbox{max-height:50vh;overflow-y:auto;margin-bottom:10px;padding:10px;border:1px solid #334155;border-radius:16px;background:rgba(15,23,42,.5)}
-.msg{padding:12px;border-radius:12px;margin:6px 0;max-width:85%;white-space:pre-wrap}
+.msg{animation:fadeUp .3s ease;padding:12px;border-radius:12px;margin:6px 0;max-width:85%;white-space:pre-wrap}
 .msg.user{background:linear-gradient(90deg,var(--ac1),var(--ac2));margin-left:auto;color:#fff}
 .msg.ai{background:#334155;margin-right:auto}
-input,textarea{width:100%;background:var(--bg);border:1.5px solid #334155;border-radius:14px;padding:12px 16px;color:#fff;font-size:15px;outline:none;margin-bottom:10px}
-.btn{background:linear-gradient(90deg,var(--ac1),var(--ac2));color:#fff;border:none;border-radius:12px;padding:10px 18px;font-weight:600;cursor:pointer}
-.btn.ghost{background:#334155}
-.btn.danger{background:#ef4444}
+.msg .tools{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+.chat-item{background:#1e293b;border-radius:12px;padding:12px;margin:8px 0;cursor:pointer}
+.admin-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap;background:#0f172a;border-radius:10px;padding:8px}
+.admin-row span{flex:1;font-size:13px}
 #adminTab{display:none}
+#topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 </style></head><body>
-<div class="app">
-  <div class="topbar"><span class="logo">✨ AWESOME AI</span><span id="userInfo"></span></div>
+
+<!-- ВХОД -->
+<div class="wrap" id="authScreen">
+  <div class="card">
+    <div class="logo">✨ AWESOME AI</div>
+    <div class="sub" id="sub">Вход в аккаунт</div>
+    <div id="nameWrap"><input id="authName" placeholder="Название (имя)"></div>
+    <input id="authTg" placeholder="Telegram ID">
+    <input id="authPass" type="password" placeholder="Пароль">
+    <button class="btn" id="authBtn" onclick="doAuth()">Войти</button>
+    <button class="btn ghost" onclick="toggleMode()">Нет аккаунта? Зарегистрироваться</button>
+    <div class="err" id="err"></div>
+    <div class="hint">AWESOME AI · вход по Telegram ID</div>
+    <div class="diag" onclick="doDiag()">🔍 Диагностика</div>
+  </div>
+</div>
+
+<!-- ПРИЛОЖЕНИЕ -->
+<div id="app">
+  <div id="topbar"><span class="logo" style="font-size:22px">✨ AWESOME AI</span><span id="userInfo"></span></div>
   <div class="tabs">
-    <button class="tab active" onclick="showTab('chat')">💬 Чат</button>
+    <button class="tab active" id="tabChat" onclick="showTab('chat')">💬 Чат</button>
     <button class="tab" onclick="showTab('chats')">📁 Чаты</button>
     <button class="tab" onclick="showTab('img')">🎨 Картинки</button>
     <button class="tab" id="adminTab" onclick="showTab('admin')">⚙️ Админ</button>
@@ -430,8 +418,13 @@ input,textarea{width:100%;background:var(--bg);border:1.5px solid #334155;border
   </div>
   <div id="view-chat">
     <div class="chatbox" id="chatBox"><div class="msg ai">Привет! 👋 Напиши мне что-нибудь.</div></div>
-    <textarea id="chatInput" placeholder="Сообщение..."></textarea>
-    <button class="btn" onclick="sendChat()">✈ Отправить</button>
+    <textarea id="chatInput" placeholder="Сообщение..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" style="width:auto" onclick="sendChat()">✈ Отправить</button>
+      <button class="btn ghost small" onclick="newChat()">🆕 Новый</button>
+      <button class="btn ghost small" onclick="shareChat()">🔗 Поделиться</button>
+      <button class="btn ghost small" onclick="exportChat()">📥 Экспорт</button>
+    </div>
   </div>
   <div id="view-chats" style="display:none"><div id="chatList"></div></div>
   <div id="view-img" style="display:none">
@@ -441,13 +434,43 @@ input,textarea{width:100%;background:var(--bg);border:1.5px solid #334155;border
   </div>
   <div id="view-admin" style="display:none">
     <h3>⚙️ Панель владельца</h3>
-    <div id="adminStats" style="margin:8px 0"></div>
+    <div id="adminStats" style="margin:8px 0;color:var(--muted)"></div>
     <div id="adminList"></div>
   </div>
 </div>
+
 <script>
-var curChat='';
+var isReg=false, curChat='';
 function esc(s){return (s||'').replace(/</g,'&lt;').replace(/\n/g,'<br>');}
+function showErr(m){document.getElementById('err').innerHTML=m;}
+function toggleMode(){
+  isReg=!isReg;
+  document.getElementById('nameWrap').style.display=isReg?'block':'none';
+  document.getElementById('authBtn').textContent=isReg?'Создать аккаунт':'Войти';
+  document.getElementById('sub').textContent=isReg?'Регистрация':'Вход в аккаунт';
+}
+async function doDiag(){
+  showErr('⏳ Загрузка диагностики...');
+  try{var r=await fetch('/api/diag');var d=await r.json();showErr('<b>Диагностика:</b><br>'+JSON.stringify(d));}
+  catch(e){showErr('Ошибка: '+e.message);}
+}
+async function doAuth(){
+  var name=document.getElementById('authName').value.trim();
+  var tg=document.getElementById('authTg').value.trim();
+  var pw=document.getElementById('authPass').value.trim();
+  showErr('');
+  if(!tg||!pw){showErr('Заполни Telegram ID и пароль');return;}
+  if(isReg&&!name){showErr('Заполни название');return;}
+  var b=document.getElementById('authBtn');b.textContent='⏳...';b.disabled=true;
+  try{
+    var url=isReg?'/api/register':'/api/login';
+    var body=isReg?{name:name,telegram_id:tg,password:pw}:{telegram_id:tg,password:pw};
+    var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    if(!d.ok){showErr(d.error||'Ошибка');b.textContent=isReg?'Создать аккаунт':'Войти';b.disabled=false;return;}
+    loadSession();
+  }catch(e){showErr('Ошибка сети: '+e.message);b.textContent=isReg?'Создать аккаунт':'Войти';b.disabled=false;}
+}
 function showTab(n){
   document.getElementById('view-chat').style.display=n==='chat'?'block':'none';
   document.getElementById('view-chats').style.display=n==='chats'?'block':'none';
@@ -461,45 +484,72 @@ async function sendChat(){
   var box=document.getElementById('chatBox');
   box.innerHTML+='<div class="msg user">'+esc(msg)+'</div>';
   document.getElementById('chatInput').value='';
-  box.innerHTML+='<div class="msg ai">⏳ Думаю...</div>'; box.scrollTop=box.scrollHeight;
-  var r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:curChat,message:msg})});
-  var d=await r.json();
-  var last=box.querySelector('.msg.ai:last-child'); if(last)last.innerHTML=esc(d.answer||'Ошибка');
-  curChat=d.chat_id;
+  var tid='t'+Date.now();
+  box.innerHTML+='<div class="msg ai" id="'+tid+'">⏳ Думаю...</div>'; box.scrollTop=box.scrollHeight;
+  try{
+    var r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:curChat,message:msg})});
+    var d=await r.json();
+    var el=document.getElementById(tid);
+    if(el)el.innerHTML=esc(d.answer||'Ошибка')+'<div class="tools"><button class="btn small" onclick="copyMsg(this)">📋</button><button class="btn small" onclick="speakMsg(this)">🔊</button></div>';
+    curChat=d.chat_id;
+  }catch(e){var el2=document.getElementById(tid);if(el2)el2.textContent='Ошибка сети: '+e.message;}
 }
+function copyMsg(b){var t=b.parentElement.parentElement.innerText.replace('📋','').replace('🔊','').trim();navigator.clipboard.writeText(t);b.textContent='✅';setTimeout(function(){b.textContent='📋';},1200);}
+function speakMsg(b){var t=b.parentElement.parentElement.innerText.replace('📋','').replace('🔊','').trim();var u=new SpeechSynthesisUtterance(t);u.lang='ru-RU';speechSynthesis.cancel();speechSynthesis.speak(u);}
+function newChat(){curChat='';document.getElementById('chatBox').innerHTML='<div class="msg ai">Привет! 👋</div>';}
 async function loadChats(){
-  var r=await fetch('/api/chats'); var d=await r.json(); var el=document.getElementById('chatList'); el.innerHTML='';
-  (d.chats||[]).forEach(function(c){var div=document.createElement('div');
-    div.style.cssText='background:#1e293b;border-radius:10px;padding:12px;margin:6px 0;cursor:pointer';
-    div.textContent=c.title;
-    div.onclick=function(){curChat=c.id;showTab('chat');loadMsgs();};
-    el.appendChild(div);});
+  try{
+    var r=await fetch('/api/chats');var d=await r.json();var el=document.getElementById('chatList');el.innerHTML='';
+    var list=d.chats||[];
+    if(!list.length){el.innerHTML='<p style="color:var(--muted)">Чатов нет.</p>';return;}
+    list.forEach(function(c){var div=document.createElement('div');div.className='chat-item';
+      div.textContent=(c.pinned?'📌 ':'')+c.title;
+      div.onclick=function(){curChat=c.id;showTab('chat');loadMsgs();};el.appendChild(div);});
+  }catch(e){}
 }
 async function loadMsgs(){
-  var r=await fetch('/api/messages?chat_id='+curChat); var d=await r.json(); var box=document.getElementById('chatBox');
-  box.innerHTML=''; d.messages.forEach(function(m){box.innerHTML+='<div class="msg '+(m.role==='user'?'user':'ai')+'">'+esc(m.content)+'</div>';});
+  try{
+    var r=await fetch('/api/messages?chat_id='+curChat);var d=await r.json();var box=document.getElementById('chatBox');
+    box.innerHTML='';d.messages.forEach(function(m){box.innerHTML+='<div class="msg '+(m.role==='user'?'user':'ai')+'">'+esc(m.content)+'</div>';});
+  }catch(e){}
 }
 async function genImg(){
-  var p=document.getElementById('imgPrompt').value.trim(); if(!p)return;
+  var p=document.getElementById('imgPrompt').value.trim();if(!p)return;
   var r=await fetch('/api/image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt:p})});
   var d=await r.json();
   document.getElementById('imgResult').innerHTML=d.ok?'<img src="'+d.url+'" style="max-width:100%;border-radius:12px">':'Ошибка';
 }
-async function loadAdmin(){
-  var s=await (await fetch('/api/admin/stats')).json();
-  document.getElementById('adminStats').textContent='Пользователей: '+s.users+' · Сообщений: '+s.messages;
-  var r=await fetch('/api/admin/users'); var d=await r.json(); var el=document.getElementById('adminList'); el.innerHTML='';
-  (d.users||[]).forEach(function(u){var row=document.createElement('div');
-    row.style.cssText='background:#0f172a;border-radius:10px;padding:8px;margin:4px 0';
-    row.textContent=u.name+' (ID: '+u.id+') — '+u.role+(u.premium?' 💎':''); el.appendChild(row);});
+async function shareChat(){
+  if(!curChat){alert('Сначала напиши сообщение');return;}
+  var code=curChat.slice(0,8);
+  navigator.clipboard.writeText(location.origin+'/s/'+code);
+  alert('Ссылка скопирована');
 }
-async function doLogout(){ await fetch('/api/logout',{method:'POST'}); location.href='/'; }
-// загрузка пользователя
-fetch('/api/me').then(function(r){return r.json();}).then(function(d){
-  if(!d.ok){ location.href='/'; return; }
-  document.getElementById('userInfo').textContent=d.name+' · '+d.status.role+(d.status.premium?' 💎':'');
-  if(d.status.owner)document.getElementById('adminTab').style.display='block';
-}).catch(function(){ location.href='/'; });
+function exportChat(){if(!curChat){alert('Сначала напиши сообщение');return;}window.location='/api/export?chat_id='+curChat;}
+async function loadAdmin(){
+  try{
+    var s=await (await fetch('/api/admin/stats')).json();
+    document.getElementById('adminStats').textContent='Пользователей: '+s.users+' · Сообщений: '+s.messages;
+    var r=await fetch('/api/admin/users');var d=await r.json();var el=document.getElementById('adminList');el.innerHTML='';
+    (d.users||[]).forEach(function(u){var row=document.createElement('div');row.className='admin-row';
+      row.innerHTML='<span>'+esc(u.name)+' (ID: '+u.id+') — '+u.role+(u.premium?' 💎':'')+'</span>';el.appendChild(row);});
+  }catch(e){}
+}
+async function doLogout(){await fetch('/api/logout',{method:'POST'});location.reload();}
+async function loadSession(){
+  try{
+    var r=await fetch('/api/me');var d=await r.json();
+    if(d.ok){
+      document.getElementById('authScreen').style.display='none';
+      document.getElementById('app').style.display='block';
+      document.getElementById('userInfo').textContent=d.name+' · '+d.status.role+(d.status.premium?' 💎':'');
+      if(d.status.owner)document.getElementById('adminTab').style.display='block';
+      return;
+    }
+  }catch(e){}
+  document.getElementById('authScreen').style.display='flex';
+}
+loadSession();
 </script></body></html>"""
 
 if __name__ == "__main__":
