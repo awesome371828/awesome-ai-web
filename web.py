@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """AWESOME AI WEB — полный DeepSeek-клон, 40+ функций, Premium из бота"""
-import os, re, io, time, json, base64, urllib.parse, hashlib, random, html
+import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid
 from datetime import datetime, timedelta, timezone
 import requests, urllib3
 import psycopg2, psycopg2.extras
@@ -43,9 +43,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN","8336209662:AAHdhYXhqWA-LtthwgydDSRU
 OWNER_ID = 6652898792
 FREE_LIMIT = 40
 MAX_HISTORY = 24
-GIGA_TIMEOUT = 14
-YGPT_TIMEOUT = 11
-SEARCH_TIMEOUT = 2
+GIGA_TIMEOUT = 30
+YGPT_TIMEOUT = 25
+SEARCH_TIMEOUT = 3
 TG_BOT = "@awesomeneiro_bot"
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -119,13 +119,11 @@ def eff_status(uid, tg=None):
     row=cur.fetchone(); cur.close(); conn.close()
     u=dict(row) if row else {}
     tg = tg or u.get('telegram_id') or str(uid)
-    # из Supabase
     bot=bot_status(tg)
     premium = int(bot.get('premium',0)) if bot else int(u.get('premium',0))
     expires = (bot.get('premium_expires') if bot and bot.get('premium') else u.get('premium_expires')) if premium else u.get('premium_expires')
     is_admin = int(bot.get('is_admin',0)) if bot else int(u.get('is_admin',0))
     owner = 1 if is_owner(uid,tg) else (int(bot.get('is_owner',0)) if bot else int(u.get('is_owner',0)))
-    # проверка срока
     if premium==1 and expires:
         try:
             if gm()>datetime.strptime(str(expires)[:19],'%Y-%m-%d %H:%M:%S').replace(tzinfo=MOSCOW_TZ):
@@ -240,16 +238,28 @@ def pin_chat(cid):
 # ===== НЕЙРОСЕТЬ: ЖИВОЙ СОБЕСЕДНИК =====
 tok=None; tok_t=0
 def get_tok():
+    """Получение токена GigaChat (OAuth). Ключ уже base64 — НЕ кодируем повторно."""
     global tok,tok_t
-    if tok and time.time()-tok_t<300: return tok
+    if tok and time.time()-tok_t<180: return tok
     for _ in range(3):
         try:
             r=requests.post("https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
-                headers={"Content-Type":"application/x-www-form-urlencoded","Accept":"application/json","RqUID":"00000000-0000-0000-0000-000000000000","Authorization":f"Basic {GIGACHAT_AUTH_KEY}"},
-                data={"scope":"GIGACHAT_API_PERS","grant_type":"client_credentials"},timeout=6,verify=False)
-            if r.status_code==200: tok=r.json().get("access_token"); tok_t=time.time(); return tok
-        except: pass
-        time.sleep(0.5)
+                headers={
+                    "Content-Type":"application/x-www-form-urlencoded",
+                    "Accept":"application/json",
+                    "RqUID":str(_uuid.uuid4()),              # свежий случайный UUID
+                    "Authorization":"Basic "+GIGACHAT_AUTH_KEY,  # ключ уже base64
+                },
+                data="scope=GIGACHAT_API_PERS",             # СТРОКА, а не словарь!
+                timeout=10, verify=False)
+            if r.status_code==200:
+                j=r.json()
+                if j.get("access_token"):
+                    tok=j["access_token"]; tok_t=time.time(); return tok
+        except Exception:
+            pass
+        time.sleep(0.7)
+    tok=None
     return None
 
 def giga(hist,sysp,max_tok=1500):
@@ -258,21 +268,29 @@ def giga(hist,sysp,max_tok=1500):
         if not t: return None
         msgs=[{"role":"system","content":sysp[:2000]}]+[{"role":h["role"],"content":(h.get("content") or "")[:600]} for h in hist[-10:] if h.get("role") in("user","assistant")]
         r=requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-            headers={"Authorization":f"Bearer {t}","Content-Type":"application/json","Accept":"application/json"},
+            headers={"Authorization":"Bearer "+t,"Content-Type":"application/json","Accept":"application/json"},
             json={"model":"GigaChat-Pro","messages":msgs,"temperature":0.85,"max_tokens":max_tok},
             timeout=GIGA_TIMEOUT,verify=False)
-        if r.status_code==200: return r.json()["choices"][0]["message"]["content"]
-    except: pass
+        if r.status_code==200:
+            try: return r.json()["choices"][0]["message"]["content"]
+            except Exception: return None
+    except Exception:
+        pass
     return None
 
 def ygpt(text,sysp):
     try:
         r=requests.post("https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
-            headers={"Authorization":f"Api-Key {YANDEX_API_KEY}","Content-Type":"application/json"},
-            json={"modelUri":f"gpt://{FOLDER_ID}/yandexgpt/latest","completionOptions":{"temperature":0.7,"maxTokens":700},
-                  "messages":[{"role":"system","text":sysp[:1200]},{"role":"user","text":text}]},timeout=YGPT_TIMEOUT)
-        if r.status_code==200: return r.json()["result"]["alternatives"][0]["message"]["text"]
-    except: pass
+            headers={"Authorization":"Api-Key "+YANDEX_API_KEY,"Content-Type":"application/json"},
+            json={"modelUri":"gpt://"+FOLDER_ID+"/yandexgpt/latest",
+                  "completionOptions":{"temperature":0.7,"maxTokens":700,"stream":False},
+                  "messages":[{"role":"system","text":sysp[:1200]},{"role":"user","text":text}]},
+            timeout=YGPT_TIMEOUT)
+        if r.status_code==200:
+            try: return r.json()["result"]["alternatives"][0]["message"]["text"]
+            except Exception: return None
+    except Exception:
+        pass
     return None
 
 SUPER="""ТЫ — AWESOME AI, живой, умный и дружелюбный ИИ-собеседник нового поколения. Ты НЕ шаблон и не бот-затычка.
@@ -310,16 +328,16 @@ def smart_answer(uid,text,history,img=None,tg=None,doc=None):
         except: return "🧮 Не понял выражение. Например: 2+2*3"
     if "кто ты" in tl or "что ты умеешь" in tl:
         return "Я **AWESOME AI** — твой живой умный помощник ✨\n\nУмею:\n**1. Общаться** 🗣 — поддерживаю разговор, помню детали\n**2. Отвечать** 💡 — на любые вопросы, даю развёрнутые ответы\n**3. Считать** 🧮 — математика, формулы\n**4. Рисовать** 🎨 — генерирую картинки\n**5. Погода/валюты/крипта** 🌤💵🪙\n**6. Помогать с задачами** 🚀 — код, идеи, планы\n\nЧто хочешь попробовать?"
-    return "🤖 Обрабатываю... Напиши чуть подробнее, и я дам полный ответ!"
+    return "⚠️ Соединение с нейросетью не установлено. Проверь ключи GigaChat/Yandex или интернет на сервере и попробуй ещё раз."
 
 def describe_img(b64):
     try:
         t=get_tok()
         if not t: return "📸 Изображение"
         r=requests.post("https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
-            headers={"Authorization":f"Bearer {t}","Content-Type":"application/json","Accept":"application/json"},
+            headers={"Authorization":"Bearer "+t,"Content-Type":"application/json","Accept":"application/json"},
             json={"model":"GigaChat-Pro","messages":[{"role":"system","content":"Опиши изображение подробно на русском, живо."},
-                {"role":"user","content":[{"type":"text","text":"Что на изображении?"},{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}}]}],"temperature":0.5,"max_tokens":400},timeout=GIGA_TIMEOUT,verify=False)
+                {"role":"user","content":[{"type":"text","text":"Что на изображении?"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,"+b64}}]}],"temperature":0.5,"max_tokens":400},timeout=GIGA_TIMEOUT,verify=False)
         if r.status_code==200: return r.json()["choices"][0]["message"]["content"]
     except: pass
     return "📸 Изображение"
@@ -329,7 +347,7 @@ def gen_img(prompt):
         c=prompt
         for w in ['нарисуй','сгенерируй','покажи','картинку','изображение','нарисуй мне']: c=c.replace(w,'').strip()
         if not c: c=prompt
-        r=requests.get(f"https://image.pollinations.ai/prompt/{urllib.parse.quote(c)}?width=1024&height=1024&nologo=true",headers={"User-Agent":"Mozilla/5.0"},timeout=20)
+        r=requests.get(f"https://image.pollinations.ai/prompt/{urllib.parse.quote(c)}?width=1024&height=1024&nologo=true",headers={"User-Agent":"Mozilla/5.0"},timeout=25)
         if r.status_code==200 and len(r.content)>1000: return base64.b64encode(r.content).decode()
     except: pass
     return None
@@ -387,7 +405,6 @@ def api_login():
     ok,msg=login_user(tg,pw)
     if not ok: return jsonify({'ok':False,'error':msg})
     u=get_user(tg); session.permanent=True; session['user_id']=tg; session['name']=u.get('name') if u else tg
-    # сразу синхронизируем статус из Supabase
     st=eff_status(tg,tg)
     if u and st['is_owner']:
         try:
@@ -412,7 +429,7 @@ def api_status():
     uid=session.get('user_id')
     if not uid: return jsonify({'ok':False})
     u=get_user(uid); tg=u.get('telegram_id') if u else uid
-    s=eff_status(uid,tg)   # статус из Supabase (бота) + owner
+    s=eff_status(uid,tg)
     conn=get_db(); cur=conn.cursor()
     cur.execute("SELECT messages_today FROM users WHERE user_id=%s",(str(uid),)); row=cur.fetchone(); cur.close(); conn.close()
     if s['is_owner']: st="👑 Владелец"; lim="♾️"
@@ -583,7 +600,6 @@ def admin_check():
     if not is_owner(uid,u.get('telegram_id') if u else None): return None,False,"Нет доступа"
     return uid,True,""
 
-# универсальный парсер длительности: число + единица (s/min/h/d/w/mo/y)
 UNITS={'s':'секунд','sec':'секунд','min':'минут','m':'минут','h':'часов','hour':'часов','d':'дней','day':'дней','w':'недель','week':'недель','mo':'месяцев','month':'месяцев','y':'лет','year':'лет'}
 def parse_duration(num,unit):
     try: n=int(num)
@@ -966,5 +982,5 @@ document.addEventListener('DOMContentLoaded',init);
 
 if __name__ == '__main__':
     print("🧠 AWESOME AI WEB — полный DeepSeek-клон, 40+ функций, Premium из бота")
-    port=int(os.getenv("PORT",8080))
+    port=int(os.getenv("PORT",5000))
     app.run(host='0.0.0.0',port=port,debug=False,threaded=True)
