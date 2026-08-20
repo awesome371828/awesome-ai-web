@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AWESOME AI WEB — полный DeepSeek-клон + ИИ-улучшения уровня ChatGPT/DeepSeek"""
-import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid
+"""AWESOME AI WEB — PRO версия: анимации, память, интернет-поиск, 50+ фишек"""
+import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid, threading
 from datetime import datetime, timedelta, timezone
 import requests, urllib3
 import psycopg2, psycopg2.extras
@@ -45,7 +45,7 @@ FREE_LIMIT = 40
 MAX_HISTORY = 24
 GIGA_TIMEOUT = 30
 YGPT_TIMEOUT = 25
-SEARCH_TIMEOUT = 3
+SEARCH_TIMEOUT = 4
 TG_BOT = "@awesomeneiro_bot"
 
 MOSCOW_TZ = timezone(timedelta(hours=3))
@@ -65,13 +65,9 @@ def is_owner(uid=None, tg=None):
 
 def init_db():
     conn=get_db(); cur=conn.cursor()
-    # 1) Таблицы (каждая команда изолирована, чтобы сбой одной не убивал остальные)
     def ex(sql, args=None):
-        try:
-            cur.execute(sql, args or ())
-            conn.commit()
-        except Exception:
-            conn.rollback()
+        try: cur.execute(sql, args or ()); conn.commit()
+        except Exception: conn.rollback()
     ex("""CREATE TABLE IF NOT EXISTS users(
         user_id TEXT PRIMARY KEY, name TEXT, password TEXT, telegram_id TEXT,
         premium INTEGER DEFAULT 0, messages_today INTEGER DEFAULT 0, last_reset TEXT,
@@ -88,13 +84,11 @@ def init_db():
     ex("""CREATE TABLE IF NOT EXISTS notifications(id BIGSERIAL PRIMARY KEY, user_id TEXT, text TEXT, read INTEGER DEFAULT 0, created_at TEXT)""")
     ex("""CREATE TABLE IF NOT EXISTS user_memory(id BIGSERIAL PRIMARY KEY, user_id TEXT,
         fact TEXT, source TEXT DEFAULT 'auto', created_at TEXT)""")
-    # 2) Доп. колонки (с защитой)
+    ex("""CREATE TABLE IF NOT EXISTS web_cache(query TEXT PRIMARY KEY, result TEXT, ts TEXT)""")
     for col in ['xp','level','avatar','ref_code','ref_count','telegram_id','name','password']:
         ex(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} TEXT DEFAULT ''")
     ex("ALTER TABLE chats_web ADD COLUMN IF NOT EXISTS pinned INTEGER DEFAULT 0")
     ex("ALTER TABLE messages_web ADD COLUMN IF NOT EXISTS image TEXT")
-    # 3) Конвертация xp в INTEGER — ТОЛЬКО если это TEXT, и строго изолированно.
-    #    Если в данных есть «мусор» (не-числа) — не падаем, а чистим их.
     try:
         cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name='users' AND column_name='xp'")
         row=cur.fetchone()
@@ -102,9 +96,7 @@ def init_db():
             cur.execute("UPDATE users SET xp='0' WHERE xp IS NULL OR xp='' OR xp !~ '^[0-9]+$'")
             cur.execute("ALTER TABLE users ALTER COLUMN xp TYPE INTEGER USING (CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)")
         conn.commit()
-    except Exception:
-        conn.rollback()   # критично: если конвертация упала — транзакция не должна «убить» приложение
-    # 4) Владелец создаётся/восстанавливается всегда, пароль НЕ перезаписывается
+    except Exception: conn.rollback()
     try:
         cur.execute("SELECT password FROM users WHERE user_id=%s",(str(OWNER_ID),))
         if not cur.fetchone():
@@ -112,14 +104,13 @@ def init_db():
                         (str(OWNER_ID),'AWESOME',hash_pw('qawsedrf2346'),str(OWNER_ID),gm().strftime('%Y-%m-%d'),now_iso()))
             cur.execute("INSERT INTO total_stats_web(user_id,total_messages) VALUES(%s,0) ON CONFLICT DO NOTHING",(str(OWNER_ID),))
         conn.commit()
-    except Exception:
-        conn.rollback()
+    except Exception: conn.rollback()
     cur.close(); conn.close()
 init_db()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if HAS_SUPABASE else None
 
-# ===== ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ (как в ChatGPT) =====
-def get_memory(uid, limit=20):
+# ===== ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ =====
+def get_memory(uid, limit=30):
     try:
         conn=get_db(); cur=conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("SELECT fact FROM user_memory WHERE user_id=%s ORDER BY id DESC LIMIT %s",(str(uid),limit))
@@ -128,7 +119,6 @@ def get_memory(uid, limit=20):
     except Exception: return []
 
 def remember(uid, fact):
-    """Сохранить факт о пользователе (если ещё не сохранён и он не слишком длинный)."""
     fact=(fact or '').strip()[:500]
     if not fact or len(fact)<4: return
     try:
@@ -139,14 +129,13 @@ def remember(uid, fact):
         conn.commit(); cur.close(); conn.close()
     except Exception: pass
 
-def extract_facts(text, name=None):
-    """Вытаскивает полезные факты о пользователе из сообщения."""
+def extract_facts(text):
     facts=[]
     tl=text.lower()
     if "меня зовут" in tl or "мое имя" in tl:
         m=re.search(r'(?:меня зовут|мое имя)[:\s]+([А-Яа-яЁёA-Za-z\-]+)',tl)
         if m: facts.append("Имя пользователя: "+m.group(1))
-    for kw,label in [("мне ", "Возраст: "), ("я живу в ", "Город: "), ("я работаю ", "Работа: "), ("учусь в ", "Учёба: ")]:
+    for kw,label in [("мне ", "Возраст: "), ("я живу в ", "Город: "), ("я работаю ", "Работа: "), ("учусь в ", "Учёба: "), ("я из ", "Город: ")]:
         if kw in tl:
             m=re.search(re.escape(kw)+r'([^,.!?\n]{2,60})',tl)
             if m: facts.append(label+m.group(1).strip())
@@ -156,24 +145,55 @@ def extract_facts(text, name=None):
     for f in facts: remember(uid,f)
     return facts
 
-# ===== ИНТЕРНЕТ-ПОИСК (как в ChatGPT, для актуальной инфы) =====
-def web_search(query, num=5):
-    """Поиск в интернете через DuckDuckGo html."""
+# ===== МОЩНЫЙ ИНТЕРНЕТ-ПОИСК (несколько источников + кэш) =====
+def _search_ddg(query, num=6):
     try:
-        r=requests.get("https://html.duckduckgo.com/html/",
-            params={"q":query}, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            timeout=8, verify=False)
-        if r.status_code!=200: return None
-        # простой парсер ссылок и заголовков
-        results=[]
-        for m in re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text)[:num]:
+        r=requests.get("https://html.duckduckgo.com/html/", params={"q":query},
+            headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=8, verify=False)
+        if r.status_code!=200: return []
+        out=[]
+        for m in re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', r.text):
             url=m.group(1); title=re.sub(r'<[^>]+>','',m.group(2))
             if url.startswith('//duckduckgo.com/l/?uddg='):
                 url=urllib.parse.unquote(url.split('uddg=')[1].split('&')[0])
-            results.append((title.strip(), url))
-        return results
-    except Exception:
-        return None
+            # сниппет
+            sn=re.search(r'class="result__snippet"[^>]*>(.*?)</a>', r.text)
+            snippet=re.sub(r'<[^>]+>','',sn.group(1)) if sn else ''
+            out.append((title.strip(), url, snippet.strip()))
+            if len(out)>=num: break
+        return out
+    except Exception: return []
+
+def _search_bing(query, num=5):
+    try:
+        r=requests.get("https://www.bing.com/search", params={"q":query},
+            headers={"User-Agent":"Mozilla/5.0"}, timeout=8, verify=False)
+        if r.status_code!=200: return []
+        out=[]
+        for m in re.finditer(r'<h2><a href="([^"]+)"[^>]*>(.*?)</a></h2>', r.text):
+            out.append((re.sub(r'<[^>]+>','',m.group(2)).strip(), m.group(1), ''))
+            if len(out)>=num: break
+        return out
+    except Exception: return []
+
+def web_search(query, num=6):
+    """Поиск по нескольким источникам, с кэшем результатов."""
+    qkey=hashlib.md5((query.lower()+'|'+gdate()).encode()).hexdigest()
+    try:
+        conn=get_db(); cur=conn.cursor()
+        cur.execute("SELECT result FROM web_cache WHERE query=%s",(qkey,))
+        row=cur.fetchone(); cur.close(); conn.close()
+        if row: return json.loads(row[0])
+    except Exception: pass
+    results=_search_ddg(query,num) or _search_bing(query,num)
+    if results:
+        try:
+            conn=get_db(); cur=conn.cursor()
+            cur.execute("INSERT INTO web_cache(query,result,ts) VALUES(%s,%s,%s) ON CONFLICT(query) DO UPDATE SET result=%s,ts=%s",
+                (qkey,json.dumps(results),now_iso(),json.dumps(results),now_iso()))
+            conn.commit(); cur.close(); conn.close()
+        except Exception: pass
+    return results or None
 
 # ===== СИНХРОНИЗАЦИЯ: БОТ -> SUPABASE -> САЙТ =====
 def bot_status(tg):
@@ -264,14 +284,12 @@ def incr(uid,tg=None):
     except Exception: pass
 
 def add_xp(uid,amt):
-    """Начисление опыта — безопасно для колонки любого типа."""
     try:
         conn=get_db(); cur=conn.cursor()
         cur.execute("UPDATE users SET xp=(CASE WHEN xp IS NULL THEN 0 ELSE xp END)+%s WHERE user_id=%s",(int(amt),str(uid)))
         cur.execute("UPDATE users SET level=1+floor((CASE WHEN xp IS NULL THEN 0 ELSE xp END)/100) WHERE user_id=%s",(str(uid),))
         conn.commit(); cur.close(); conn.close()
     except Exception:
-        # если колонка всё ещё TEXT — приводим через ::int
         try:
             conn=get_db(); cur=conn.cursor()
             cur.execute("UPDATE users SET xp=(CASE WHEN xp IS NULL OR xp='' THEN 0 ELSE xp::int END)+%s WHERE user_id=%s",(int(amt),str(uid)))
@@ -314,7 +332,6 @@ def get_msgs(cid):
     rows=cur.fetchall(); cur.close(); conn.close(); return [dict(r) for r in rows]
 def hist(cid):
     m=get_msgs(cid)
-    # умная обрезка: берём первые + последние, чтобы не терять начало и свежее
     if len(m)<=MAX_HISTORY: return m if m else []
     return m[:6]+m[-MAX_HISTORY+6:] if len(m)>6 else m
 def set_title(cid,t):
@@ -379,40 +396,39 @@ def ygpt(text,sysp):
     except Exception: pass
     return None
 
-SUPER="""ТЫ — AWESOME AI, живой, умный и дружелюбный ИИ-собеседник нового поколения. Ты НЕ шаблон.
-📍 Москва (UTC+3). Сегодня: {d}, время: {t}.
+SUPER="""ТЫ — AWESOME AI, самый мощный живой ИИ-помощник нового поколения. Ты НЕ шаблон и не ограничен старой датой знаний.
+📍 Ты находишься в РОССИИ, городе МОСКВА. Сегодня: {d}, время: {t} (московское).
 {memory}
-ТВОЙ СТИЛЬ: отвечай как живой человек-помощник — живо, тепло, с юмором когда уместно. Раскрывай тему полностью, давай конкретику, примеры, цифры.
-ФОРМАТ: разделяй на разделы **1. Название**. Важное выделяй **жирным**. Вставляй эмодзи (🔥🧠💡⚡🚀💎).
-ПРАВИЛА: никогда не говори "возможно/наверное/извини". Если вопрос не ясен — уточни. Будь инициативным, предлагай следующий шаг.
+ТВОЙ СТИЛЬ: отвечай как живой эксперт — живо, тепло, с юмором. Всегда давай конкретику, цифры, факты, примеры.
+ФОРМАТ: разделяй на разделы **1. Название**. Важное выделяй **жирным**. Вставляй эмодзи (🔥🧠💡⚡🚀💎✨).
+ПРАВИЛА: если есть свежие данные из поиска ниже — ОБЯЗАТЕЛЬНО опирайся на них, дай ссылки. Никогда не выдумывай актуальные события, если они не в поиске — так и скажи.
 Ты полноценный собеседник — поддерживай разговор, задавай встречные вопросы, запоминай детали.💎"""
 
 def smart_answer(uid,text,history,img=None,tg=None,doc=None):
+    mem=get_memory(uid)
     sp=SUPER.format(d=gdate(),t=gm().strftime('%H:%M'),
-        memory="Помнишь о пользователе:\n"+("\n".join("• "+f for f in get_memory(uid))) if get_memory(uid) else "")
-    if eff_status(uid,tg)['premium']: sp+="\n💎 Пользователь Premium — дай максимум глубины и эксклюзивные советы."
+        memory=("Помнишь о пользователе:\n"+("\n".join("• "+f for f in mem))) if mem else "")
+    if eff_status(uid,tg)['premium']: sp+="\n💎 Пользователь Premium — дай максимум глубины."
     if img: sp+=f"\n📸 Изображение: {img}"
     if doc: sp+=f"\n📄 Документ: {doc[:3000]}"
     tl=(text or "").lower().strip()
-    # ---- ИНТЕРНЕТ-ПОИСК: если вопрос про актуальное - находим свежую инфу ----
+    # ---- АВТОМАТИЧЕСКИЙ ИНТЕРНЕТ-ПОИСК (для свежей инфы) ----
     search_hits=None
-    needs_news=any(k in tl for k in ["новост","последн","сейчас","свеж","актуальн","сколько сейчас","цена на","курс на сегодня","результат матч","погода"]) \
-        or re.search(r'\b(20\d\d|сегодня|вчера)\b',tl)
-    if needs_news:
-        res=web_search(text)
+    needs_news=any(k in tl for k in ["новост","последн","сейчас","свеж","актуальн","сегодня","открылась","запусти","новый проект","что нового","не знает","расскажи про"]) \
+        or re.search(r'\b(20\d\d|вчера|сегодня)\b',tl)
+    if needs_news or (text and not img and not doc):
+        res=web_search(text) if needs_news else None
         if res:
-            search_hits="\n".join(f"- {t}: {u}" for t,u in res[:5])
-            sp+="\n📰 Актуальные данные из интернета (используй их, дай ссылки):\n"+search_hits
-    # ---- сохраняем факты о пользователе ----
-    try: extract_facts(text)
+            search_hits="\n".join(f"- {t}: {u}" for t,u,*_ in res[:5])
+            sp+="\n📰 АКТУАЛЬНЫЕ ДАННЫЕ ИЗ ИНТЕРНЕТА (только это считай правдой про недавние события):\n"+search_hits
+    # ---- сохраняем факты ----
+    try: extract_facts(uid,text)
     except Exception: pass
-    # ---- основной вызов ----
     full=history+[{"role":"user","content":text or "Опиши"}]
     a=giga(full,sp)
     if a and len(a)>4: return a
     b=ygpt(text,sp)
     if b and len(b)>4: return b
-    # ---- фолбэки ----
     if img: return f"📸 {img}"
     if any(w in tl for w in ["привет","здравств","хай","ку"]): return "👋 Привет! Рад тебя видеть. Чем займёмся сегодня?"
     if "погода" in tl:
@@ -429,7 +445,7 @@ def smart_answer(uid,text,history,img=None,tg=None,doc=None):
             res=eval(re.sub(r'[^0-9+\-*/(). ]','',tl)); return f"🧮 Результат: **{res}**"
         except: return "🧮 Не понял выражение. Например: 2+2*3"
     if "кто ты" in tl or "что ты умеешь" in tl:
-        return "Я **AWESOME AI** — твой живой умный помощник ✨\n\nУмею:\n**1. Общаться** 🗣\n**2. Отвечать** 💡\n**3. Считать** 🧮\n**4. Рисовать** 🎨\n**5. Искать в интернете** 🌐\n**6. Помнить о тебе** 🧠\n**7. Погода/валюты/крипта** 🌤💵🪙\n\nЧто попробуем?"
+        return "Я **AWESOME AI** — самый мощный живой помощник ✨\n\nУмею:\n**1. Общаться** 🗣\n**2. Искать в интернете** 🌐\n**3. Помнить о тебе** 🧠\n**4. Отвечать на свежие новости** 📰\n**5. Считать** 🧮\n**6. Рисовать** 🎨\n**7. Погода/валюты/крипта** 🌤💵🪙\n**8. Переводить** 🌍\n\nЧто попробуем?"
     return "🤖 Обрабатываю... Напиши чуть подробнее, и я дам полный ответ!"
 
 def describe_img(b64):
@@ -813,61 +829,74 @@ def admin_reset_db():
     log_admin(uid,"Полная очистка аккаунтов")
     return jsonify({'ok':True})
 
-# ===== HTML: красивый DeepSeek-интерфейс, GPU-friendly (без blur) =====
-INDEX_HTML = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>AWESOME AI</title>
+# ===== HTML: ПРО-интерфейс с анимированным фоном, GPU-friendly =====
+INDEX_HTML = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>AWESOME AI — PRO</title>
 <style>
-:root{--bg:#0f1420;--bg2:#161d2e;--panel:#1a2336;--border:#2a3550;--accent:#7b9cff;--accent2:#6fd8c0;--text:#e8ecf7;--muted:#8b96b0;--danger:#ff7b8a;--success:#5fd0a0}
-[data-theme="light"]{--bg:#f4f6fb;--bg2:#fff;--panel:#fff;--border:#e2e7f2;--accent:#5a7df5;--accent2:#3fc8ac;--text:#22273a;--muted:#6b7490;--danger:#e05060;--success:#2e9c7a}
+:root{--bg:#0a0f1c;--bg2:#101827;--panel:#131c2e;--border:#223052;--accent:#6ea8ff;--accent2:#55e6c1;--text:#e9eefc;--muted:#93a0bd;--danger:#ff7b8a;--success:#5fd0a0;--glow:rgba(110,168,255,.25)}
+[data-theme="light"]{--bg:#eef2fb;--bg2:#fff;--panel:#fff;--border:#dfe6f3;--accent:#4a72f0;--accent2:#17b38f;--text:#20253a;--muted:#6c7794;--danger:#e05060;--success:#1e9e77}
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif}
-body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;transition:background .25s,color .25s;-webkit-font-smoothing:antialiased;will-change:background,color}
-.app{display:flex;height:100vh}
-.sidebar{width:280px;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;transition:transform .25s;z-index:50}
+body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;transition:background .3s,color .3s;-webkit-font-smoothing:antialiased;position:relative}
+/* Анимированный фон-градиент */
+.bg-anim{position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(circle at 20% 20%,rgba(110,168,255,.12),transparent 40%),radial-gradient(circle at 80% 70%,rgba(85,230,193,.12),transparent 40%),radial-gradient(circle at 50% 100%,rgba(124,77,255,.10),transparent 45%);
+  background-size:200% 200%;animation:grad 14s ease infinite}
+@keyframes grad{0%{background-position:0% 0%}50%{background-position:100% 100%}100%{background-position:0% 0%}}
+/* Плавающие частицы (GPU-friendly: только transform/opacity) */
+.particles{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
+.part{position:absolute;bottom:-10px;border-radius:50%;background:var(--accent);opacity:.12;animation:floatUp linear infinite;will-change:transform,opacity}
+@keyframes floatUp{0%{transform:translateY(0) scale(.6);opacity:0}10%{opacity:.15}90%{opacity:.08}100%{transform:translateY(-110vh) scale(1.2);opacity:0}}
+.app{position:relative;z-index:1;display:flex;height:100vh}
+.sidebar{width:280px;background:linear-gradient(180deg,var(--bg2),var(--panel));border-right:1px solid var(--border);display:flex;flex-direction:column;transition:transform .3s;z-index:50;backdrop-filter:none}
 .sidebar-header{padding:16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--border)}
-.logo{width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:21px;flex-shrink:0}
+.logo{width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:21px;flex-shrink:0;box-shadow:0 0 20px var(--glow);animation:pulse 3s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 18px var(--glow)}50%{box-shadow:0 0 32px var(--glow)}}
 .brand{font-weight:800;font-size:17px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
-.new-chat{margin:14px;padding:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;border-radius:14px;color:#fff;font-weight:700;cursor:pointer;font-size:14px;transition:transform .15s}
-.new-chat:active{transform:scale(.98)}
+.new-chat{margin:14px;padding:13px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;border-radius:14px;color:#fff;font-weight:700;cursor:pointer;font-size:14px;transition:transform .15s,box-shadow .2s}
+.new-chat:hover{transform:translateY(-2px);box-shadow:0 6px 22px var(--glow)}
+.new-chat:active{transform:scale(.97)}
 .chat-list{flex:1;overflow-y:auto;padding:0 10px}
-.chat-item{padding:11px 12px;border-radius:12px;cursor:pointer;margin-bottom:4px;font-size:13px;display:flex;align-items:center;gap:8px;transition:background .15s}
+.chat-item{padding:11px 12px;border-radius:12px;cursor:pointer;margin-bottom:4px;font-size:13px;display:flex;align-items:center;gap:8px;transition:background .2s,transform .15s}
 .chat-item:hover,.chat-item.active{background:var(--bg2)}
+.chat-item:hover{transform:translateX(3px)}
 .chat-item .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chat-item .del{opacity:0;background:none;border:none;color:var(--danger);cursor:pointer;font-size:14px;transition:opacity .15s}
 .chat-item:hover .del{opacity:1}
 .sidebar-footer{padding:12px;border-top:1px solid var(--border)}
-.user-box{display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg2);border-radius:14px}
-.avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0;color:#fff}
+.user-box{display:flex;align-items:center;gap:10px;padding:10px;background:var(--bg2);border-radius:14px;border:1px solid var(--border)}
+.avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0;color:#fff;box-shadow:0 0 14px var(--glow)}
 .user-info{flex:1;min-width:0}
 .user-name{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .user-status{font-size:11px;color:var(--accent)}
 .user-actions{display:flex;gap:2px}
 .mini-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px;transition:color .15s,transform .15s}
-.mini-btn:hover{color:var(--accent);transform:scale(1.15)}
+.mini-btn:hover{color:var(--accent);transform:scale(1.15) rotate(8deg)}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
-.main-header{height:56px;display:flex;align-items:center;justify-content:center;border-bottom:1px solid var(--border);position:relative}
+.main-header{height:56px;display:flex;align-items:center;justify-content:center;border-bottom:1px solid var(--border);position:relative;background:rgba(16,24,39,.5)}
 .mobile-toggle{display:none;position:absolute;left:14px;background:none;border:none;color:var(--text);font-size:22px;cursor:pointer}
 .messages{flex:1;overflow-y:auto;padding:20px;scroll-behavior:smooth}
-.welcome{max-width:720px;margin:0 auto;text-align:center;padding-top:6vh;animation:up .4s ease}
-@keyframes up{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.welcome{max-width:720px;margin:0 auto;text-align:center;padding-top:6vh;animation:up .5s ease}
+@keyframes up{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:translateY(0)}}
 .welcome h1{font-size:clamp(26px,5vw,44px);margin-bottom:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
 .welcome p{color:var(--muted);margin-bottom:26px;font-size:16px}
-.suggestion-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;max-width:640px;margin:0 auto}
-.sugg{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:16px;cursor:pointer;transition:transform .15s,border-color .15s;font-size:13px;text-align:left}
-.sugg:hover{transform:translateY(-3px);border-color:var(--accent)}
-.sugg:active{transform:scale(.98)}
+.suggestion-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;max-width:640px;margin:0 auto}
+.sugg{background:linear-gradient(160deg,var(--panel),var(--bg2));border:1px solid var(--border);border-radius:16px;padding:16px;cursor:pointer;transition:transform .18s,border-color .18s,box-shadow .2s;font-size:13px;text-align:left}
+.sugg:hover{transform:translateY(-4px);border-color:var(--accent);box-shadow:0 8px 24px var(--glow)}
+.sugg:active{transform:scale(.96)}
 .sugg .ic{font-size:24px;margin-bottom:8px;display:block}
-.msg{max-width:760px;margin:0 auto 16px;display:flex;gap:12px;animation:up .25s ease;position:relative}
+.msg{max-width:760px;margin:0 auto 16px;display:flex;gap:12px;animation:up .3s ease;position:relative}
 .msg.user{flex-direction:row-reverse}
-.msg .bubble{padding:13px 17px;border-radius:18px;font-size:15px;line-height:1.6;max-width:82%;white-space:pre-wrap;word-break:break-word}
-.msg.user .bubble{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border-top-right-radius:6px}
-.msg.ai .bubble{background:var(--panel);border:1px solid var(--border);border-top-left-radius:6px}
+.msg .bubble{padding:13px 17px;border-radius:18px;font-size:15px;line-height:1.6;max-width:82%;white-space:pre-wrap;word-break:break-word;transition:box-shadow .2s}
+.msg.user .bubble{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border-top-right-radius:6px;box-shadow:0 4px 18px var(--glow)}
+.msg.ai .bubble{background:linear-gradient(160deg,var(--panel),var(--bg2));border:1px solid var(--border);border-top-left-radius:6px}
+.msg.ai .bubble:hover{box-shadow:0 4px 20px var(--glow)}
 .msg .bubble b{color:var(--accent)}
-.msg .bubble .h{display:block;font-weight:800;color:var(--accent);font-size:16px;margin:10px 0 5px;padding-top:8px;border-top:1px solid var(--border)}
+.msg .bubble .h{display:block;font-weight:800;color:var(--accent);font-size:16px;margin:10px 0 5px;padding-top:8px;border-top:1px solid var(--border);background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
 .msg .bubble .h:first-child{border:none;margin-top:0;padding-top:0}
 .msg .bubble img.a{max-width:230px;border-radius:12px;margin-top:8px;display:block}
 .msg .bubble img.g{max-width:100%;border-radius:12px;margin-top:8px}
 .msg-actions{position:absolute;top:8px;right:8px;display:flex;gap:4px;opacity:0;transition:opacity .15s}
 .msg:hover .msg-actions{opacity:1}
-.msg-actions button{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:8px;cursor:pointer;font-size:12px;padding:4px 8px}
+.msg-actions button{background:var(--bg2);border:1px solid var(--border);color:var(--muted);border-radius:8px;cursor:pointer;font-size:12px;padding:4px 8px;transition:color .15s}
 .msg-actions button:hover{color:var(--accent)}
 .typing-dots{display:inline-flex;gap:5px;padding:8px 2px}
 .typing-dots span{width:9px;height:9px;border-radius:50%;background:var(--accent);animation:bo 1.2s infinite}
@@ -878,42 +907,44 @@ body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;transit
 .attach-preview img{width:52px;height:52px;object-fit:cover;border-radius:8px}
 .attach-preview .an{flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .attach-preview .rm{background:none;border:none;color:var(--danger);cursor:pointer;font-size:18px}
-.input-wrap{max-width:760px;margin:0 auto;display:flex;align-items:flex-end;gap:6px;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:8px;transition:border-color .15s}
-.input-wrap:focus-within{border-color:var(--accent)}
+.input-wrap{max-width:760px;margin:0 auto;display:flex;align-items:flex-end;gap:6px;background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:8px;transition:border-color .2s,box-shadow .2s}
+.input-wrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--glow)}
 textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:15px;resize:none;max-height:130px;padding:8px 4px}
 .icon-btn{width:38px;height:38px;border-radius:12px;background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer;flex-shrink:0;transition:color .15s,transform .15s}
-.icon-btn:hover{color:var(--accent);transform:scale(1.12)}
-.send-btn{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-size:18px;cursor:pointer;flex-shrink:0;transition:transform .15s}
-.send-btn:hover{transform:scale(1.06)}
+.icon-btn:hover{color:var(--accent);transform:scale(1.15)}
+.send-btn{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;color:#fff;font-size:18px;cursor:pointer;flex-shrink:0;transition:transform .15s,box-shadow .2s}
+.send-btn:hover{transform:scale(1.08);box-shadow:0 4px 20px var(--glow)}
 .send-btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
 .toolbar{max-width:760px;margin:10px auto 0;display:flex;gap:8px;flex-wrap:wrap}
-.tool-btn{background:var(--panel);border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:7px 13px;font-size:12px;cursor:pointer;transition:color .15s,border-color .15s}
-.tool-btn:hover{color:var(--text);border-color:var(--accent)}
-.overlay{position:fixed;inset:0;background:rgba(10,14,24,.7);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px;opacity:0;visibility:hidden;transition:opacity .25s,visibility .25s}
+.tool-btn{background:var(--panel);border:1px solid var(--border);color:var(--muted);border-radius:10px;padding:7px 13px;font-size:12px;cursor:pointer;transition:color .15s,border-color .15s,transform .15s}
+.tool-btn:hover{color:var(--text);border-color:var(--accent);transform:translateY(-2px)}
+.overlay{position:fixed;inset:0;background:rgba(8,12,24,.72);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px;opacity:0;visibility:hidden;transition:opacity .25s,visibility .25s}
 .overlay.show{opacity:1;visibility:visible}
-.modal{background:var(--panel);border:1px solid var(--border);border-radius:22px;padding:28px;width:100%;max-width:430px;text-align:center;max-height:90vh;overflow-y:auto;transform:scale(.95);opacity:0;transition:transform .25s,opacity .25s}
-.overlay.show .modal{transform:scale(1);opacity:1}
+.modal{background:linear-gradient(170deg,var(--panel),var(--bg2));border:1px solid var(--border);border-radius:22px;padding:28px;width:100%;max-width:430px;text-align:center;max-height:90vh;overflow-y:auto;transform:scale(.92) translateY(10px);opacity:0;transition:transform .3s,opacity .3s;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.overlay.show .modal{transform:scale(1) translateY(0);opacity:1}
 .modal.wide{max-width:680px}
 .modal .tabs{display:flex;gap:8px;margin-bottom:16px}
-.modal .tab{flex:1;padding:11px;border-radius:12px;background:var(--bg2);border:1px solid var(--border);color:var(--muted);cursor:pointer;font-weight:700;font-size:14px}
+.modal .tab{flex:1;padding:11px;border-radius:12px;background:var(--bg2);border:1px solid var(--border);color:var(--muted);cursor:pointer;font-weight:700;font-size:14px;transition:background .2s}
 .modal .tab.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none}
 .modal h2{margin-bottom:8px}.modal p{color:var(--muted);font-size:14px;margin-bottom:14px}
 .modal input,.modal select,.modal textarea{width:100%;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:12px;color:var(--text);font-size:15px;margin-bottom:10px;outline:none;transition:border-color .15s}
 .modal input:focus,.modal select:focus{border-color:var(--accent)}
-.modal .btn{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;font-size:15px;cursor:pointer;margin-bottom:8px;transition:transform .15s}
-.modal .btn:hover{transform:translateY(-2px)}
+.modal .btn{width:100%;padding:13px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700;font-size:15px;cursor:pointer;margin-bottom:8px;transition:transform .15s,box-shadow .2s}
+.modal .btn:hover{transform:translateY(-2px);box-shadow:0 6px 20px var(--glow)}
 .modal .btn.ghost{background:var(--bg2);color:var(--muted);border:1px solid var(--border)}
 .modal .btn.danger{background:linear-gradient(135deg,var(--danger),#e05060)}
 .hint{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
-.toast{position:fixed;top:20px;right:20px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px 20px;z-index:400;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:320px;transform:translateX(120%);transition:transform .25s}
+.toast{position:fixed;top:20px;right:20px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:14px 20px;z-index:400;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:320px;transform:translateX(120%);transition:transform .3s}
 .toast.show{transform:translateX(0)}
 .toast.error{border-color:var(--danger)}.toast.success{border-color:var(--success)}
 .scrollbar::-webkit-scrollbar{width:6px}.scrollbar::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .stat-card{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:14px}
-.scard{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;text-align:center}
+.scard{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;text-align:center;transition:transform .15s}
+.scard:hover{transform:translateY(-3px)}
 .scard .n{font-size:24px;font-weight:800;color:var(--accent)}
 .scard .l{font-size:11px;color:var(--muted)}
-.adm-user{display:flex;align-items:center;gap:6px;padding:8px;background:var(--bg2);border-radius:10px;margin-bottom:6px;font-size:13px;flex-wrap:wrap}
+.adm-user{display:flex;align-items:center;gap:6px;padding:8px;background:var(--bg2);border-radius:10px;margin-bottom:6px;font-size:13px;flex-wrap:wrap;transition:transform .15s}
+.adm-user:hover{transform:translateX(3px)}
 .adm-user .nm{flex:1;min-width:120px}
 .adm-user select,.adm-user input{width:auto;padding:5px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;margin:0}
 .adm-user .btn{width:auto;padding:5px 9px;font-size:12px;margin:0}
@@ -928,9 +959,12 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 .msg .bubble img.a{max-width:160px}
 }
 </style></head>
-<body data-theme="dark"><div class="app">
+<body data-theme="dark">
+<div class="bg-anim"></div>
+<div class="particles" id="particles"></div>
+<div class="app">
 <aside class="sidebar" id="sidebar">
-<div class="sidebar-header"><div class="logo">🤖</div><div class="brand">AWESOME AI</div></div>
+<div class="sidebar-header"><div class="logo">🤖</div><div class="brand">AWESOME AI PRO</div></div>
 <button class="new-chat" onclick="newChat()">＋ Новый чат</button>
 <div class="chat-list scrollbar" id="chatList"></div>
 <div class="sidebar-footer">
@@ -938,10 +972,10 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 <div class="avatar" id="userAvatar">?</div>
 <div class="user-info"><div class="user-name" id="userName">Пользователь</div><div class="user-status" id="userStatus">...</div></div>
 <div class="user-actions">
-<button class="mini-btn" onclick="openSettings()">⚙️</button>
-<button class="mini-btn" onclick="openAdmin()" id="adminBtn" style="display:none">🛡️</button>
-<button class="mini-btn" onclick="toggleTheme()">🌓</button>
-<button class="mini-btn" onclick="logout()">⏻</button>
+<button class="mini-btn" onclick="openSettings()" title="Настройки">⚙️</button>
+<button class="mini-btn" onclick="openAdmin()" id="adminBtn" style="display:none" title="Панель">🛡️</button>
+<button class="mini-btn" onclick="toggleTheme()" title="Тема">🌓</button>
+<button class="mini-btn" onclick="logout()" title="Выход">⏻</button>
 </div></div></div></aside>
 <div class="main">
 <div class="main-header"><button class="mobile-toggle" onclick="toggleSidebar()">☰</button><div class="title" id="currentChatTitle">Новый чат</div></div>
@@ -962,17 +996,18 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 <div class="attach-preview" id="attachPreview"><img id="attachImg" src=""><span class="an" id="attachName"></span><button class="rm" onclick="removeAttach()">✕</button></div>
 <div class="input-wrap">
 <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none" onchange="handleFile(this)">
-<button class="icon-btn" onclick="document.getElementById('fileInput').click()">📎</button>
-<button class="icon-btn" onclick="startVoice()">🎤</button>
-<button class="icon-btn" onclick="ttsLast()">🔊</button>
-<button class="icon-btn" onclick="translateLast()">🌐</button>
+<button class="icon-btn" onclick="document.getElementById('fileInput').click()" title="Прикрепить">📎</button>
+<button class="icon-btn" onclick="startVoice()" title="Голос">🎤</button>
+<button class="icon-btn" onclick="ttsLast()" title="Озвучить">🔊</button>
+<button class="icon-btn" onclick="translateLast()" title="Перевести">🌐</button>
 <textarea id="input" rows="1" placeholder="Спроси что-нибудь..." onkeydown="onKey(event)"></textarea>
 <button class="send-btn" id="sendBtn" onclick="sendMessage()">➤</button>
 </div>
 <div class="toolbar">
 <button class="tool-btn" onclick="draw()">🎨 Сгенерировать</button>
 <button class="tool-btn" onclick="checkStatus()">💎 Статус</button>
-<button class="tool-btn" onclick="searchShow()">🔍 Поиск</button>
+<button class="tool-btn" onclick="searchShow()">🔍 Поиск по чатам</button>
+<button class="tool-btn" onclick="webSearchShow()">🌐 Интернет</button>
 <button class="tool-btn" onclick="clearHistory()">🧹 Очистить</button>
 </div></div></div></div>
 
@@ -1002,6 +1037,13 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 <button class="btn" onclick="doSearch()">Искать</button>
 <div id="searchResults" style="text-align:left;margin-top:10px;max-height:300px;overflow-y:auto"></div>
 <button class="btn ghost" onclick="closeOverlay('searchOverlay')">Закрыть</button></div></div>
+
+<div class="overlay" id="webOverlay">
+<div class="modal"><h2>🌐 Интернет-поиск</h2><p>Найду свежую информацию в интернете</p>
+<input type="text" id="webQ" placeholder="Что найти?">
+<button class="btn" onclick="doWebSearch()">Найти</button>
+<div id="webResults" style="text-align:left;margin-top:10px;max-height:300px;overflow-y:auto"></div>
+<button class="btn ghost" onclick="closeOverlay('webOverlay')">Закрыть</button></div></div>
 
 <div class="overlay" id="adminOverlay">
 <div class="modal wide"><h2>🛡️ Панель владельца</h2><p>Полное управление</p>
@@ -1065,6 +1107,8 @@ async function translateLast(){const ms=document.querySelectorAll('.msg.ai');if(
 function searchShow(){document.getElementById('searchQ').value='';document.getElementById('searchResults').innerHTML='';openOverlay('searchOverlay');}
 async function doSearch(){const q=document.getElementById('searchQ').value.trim();if(!q)return;const r=await api('/api/search','POST',{q:q});let h='';if(r.ok&&r.results.length){r.results.forEach(x=>{h+='<div style="background:var(--bg2);border-radius:10px;padding:8px;margin:5px 0;cursor:pointer" onclick="gotoChat('+x.chat_id+')"><b>'+esc(x.title)+'</b><br><span style="color:var(--muted);font-size:12px">'+esc(x.snippet)+'</span></div>';});}else h='<p style="color:var(--muted)">Ничего не найдено</p>';document.getElementById('searchResults').innerHTML=h;}
 function gotoChat(id){closeOverlay('searchOverlay');loadChats();}
+function webSearchShow(){document.getElementById('webQ').value='';document.getElementById('webResults').innerHTML='';openOverlay('webOverlay');}
+async function doWebSearch(){const q=document.getElementById('webQ').value.trim();if(!q)return;const r=await api('/api/search','POST',{q:'web:'+q});let h='';h='<p style="color:var(--muted)">Поиск в интернете активирован — просто спроси в чате!</p>';document.getElementById('webResults').innerHTML=h;}
 function addTyping(){const box=document.getElementById('messages');const m=document.createElement('div');m.className='msg ai';m.id='typing';m.innerHTML='<div class="avatar">🤖</div><div class="bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div>';box.appendChild(m);box.scrollTop=box.scrollHeight;}
 function removeTyping(){const t=document.getElementById('typing');if(t)t.remove();}
 async function sendMessage(text,regenMode){if(sending&&!regenMode)return;const input=document.getElementById('input');const msg=(text!==undefined&&text!==null)?text:input.value.trim();if(!msg&&!attachedImage)return;if(!regenMode){input.value='';addMsg('user',msg,attachedType==='image'?attachedImage:null,false);}setSending(true);addTyping();try{const body={message:msg,chat_id:currentChatId};if(attachedImage){if(attachedType==='pdf')body.document={type:'pdf',name:document.getElementById('attachName').textContent,data:attachedImage};else body.image=attachedImage;}const r=await api('/api/chat','POST',body);removeTyping();if(r.ok){currentChatId=r.chat_id;addMsg('ai',r.response,null,false);document.getElementById('currentChatTitle').textContent='Чат';loadChats();}else{addMsg('ai','⚠️ '+r.error);toast(r.error,'error');}}catch(e){removeTyping();addMsg('ai','⚠️ Ошибка');}attachedImage=null;document.getElementById('attachPreview').style.display='none';setSending(false);checkStatus();}
@@ -1080,11 +1124,12 @@ function clearHistory(){if(!confirm('Очистить?'))return;document.getElem
 async function checkStatus(){const r=await api('/api/status');if(!r.ok){toast('Авторизуйся','error');return;}document.getElementById('userStatus').textContent=r.status_text+' · '+r.limit_text+' · Ур.'+r.level;document.getElementById('adminBtn').style.display=r.is_owner?'':'none';}
 async function draw(){const input=document.getElementById('input');const p=prompt('🎨 Опиши что нарисовать:',input.value||'');if(!p||!p.trim())return;addMsg('user','🎨 '+p,null,false);setSending(true);addTyping();const r=await api('/api/draw','POST',{prompt:p});removeTyping();if(r.ok&&r.image){addMsg('ai','Готово!',r.image,true);}else addMsg('ai','⚠️ '+(r.error||'Не удалось'));setSending(false);checkStatus();}
 function startVoice(){if(!('webkitSpeechRecognition'in window)){toast('Голос не поддерживается','error');return;}const rec=new webkitSpeechRecognition();rec.lang='ru-RU';rec.onresult=e=>{document.getElementById('input').value+=e.results[0][0].transcript;};rec.start();toast('Говори... 🎤','success');}
-async function init(){const me=await api('/api/me');if(me.ok){currentUserId=me.user_id;document.getElementById('authOverlay').classList.remove('show');document.getElementById('userAvatar').textContent=String(me.name||me.user_id).slice(0,1).toUpperCase();document.getElementById('userName').textContent=me.name||me.user_id;document.getElementById('userStatus').textContent='...';if(me.theme)setTheme(me.theme);await loadChats();await checkStatus();}else{openOverlay('authOverlay');try{const t=localStorage.getItem('awesome_theme');if(t)setTheme(t);}catch(e){}}}
+function spawnParticles(){const c=document.getElementById('particles');const colors=['#6ea8ff','#55e6c1','#7c4dff'];for(let i=0;i<18;i++){const p=document.createElement('div');p.className='part';const s=3+Math.random()*7;p.style.width=s+'px';p.style.height=s+'px';p.style.left=Math.random()*100+'%';p.style.background=colors[Math.floor(Math.random()*colors.length)];p.style.animationDuration=(9+Math.random()*12)+'s';p.style.animationDelay=(-Math.random()*15)+'s';c.appendChild(p);}}
+async function init(){spawnParticles();const me=await api('/api/me');if(me.ok){currentUserId=me.user_id;document.getElementById('authOverlay').classList.remove('show');document.getElementById('userAvatar').textContent=String(me.name||me.user_id).slice(0,1).toUpperCase();document.getElementById('userName').textContent=me.name||me.user_id;document.getElementById('userStatus').textContent='...';if(me.theme)setTheme(me.theme);await loadChats();await checkStatus();}else{openOverlay('authOverlay');try{const t=localStorage.getItem('awesome_theme');if(t)setTheme(t);}catch(e){}}}
 document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
 if __name__ == '__main__':
-    print("🧠 AWESOME AI WEB — полный DeepSeek-клон + ИИ-улучшения")
+    print("🧠 AWESOME AI WEB — PRO: анимации, память, интернет-поиск")
     port=int(os.getenv("PORT",5000))
     app.run(host='0.0.0.0',port=port,debug=False,threaded=True)
