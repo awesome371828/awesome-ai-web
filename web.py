@@ -1,5 +1,5 @@
-# ================= AWESOME AI — ПОЛНАЯ РАБОЧАЯ ВЕРСИЯ =================
-# Все данные в Supabase. Исправлен порядок: декораторы объявлены ДО роутов.
+# ================= AWESOME AI — АДАПТИРОВАН ПОД ТВОЮ ТАБЛИЦУ users =================
+# Колонки: user_id, username, premium(0/1), is_admin, is_owner, premium_expires
 import os, re, uuid, hashlib, io, base64, json
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -9,7 +9,7 @@ from flask import Flask, request, jsonify, session, send_file
 
 # ============ КЛЮЧИ И НАСТРОЙКИ ============
 PORT = int(os.environ.get("PORT", "8080"))
-SESSION_TTL = 30 * 24 * 3600  # автовход 30 дней
+SESSION_TTL = 30 * 24 * 3600
 
 YANDEX_API_KEY = "AQVNyfn82epL9dy8C_kftzeypq6eF9lFd6SZnFzV"
 FOLDER_ID = "b1g4aq87c7j61c6g3i5l"
@@ -23,7 +23,7 @@ OWNER_PASS = "qawsedrf2346"
 OWNER_NAME = "Сергей (владелец)"
 
 app = Flask(__name__)
-app.secret_key = "awesome-ai-self-healing-v2"
+app.secret_key = "awesome-ai-adapted-table-v1"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(seconds=SESSION_TTL)
 _http = requests.Session()
 BOT = "https://api.telegram.org/bot" + TELEGRAM_TOKEN
@@ -35,7 +35,7 @@ SB_HDR = {"apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + SUPABASE_ANO
 def hash_pw(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
-# ============ ДЕКОРАТОРЫ (ОБЪЯВЛЕНЫ В САМОМ ВЕРХУ — ДО РОУТОВ) ============
+# ============ ДЕКОРАТОРЫ ============
 def login_required(f):
     @wraps(f)
     def wrap(*a, **k):
@@ -52,14 +52,8 @@ def owner_required(f):
         return f(*a, **k)
     return wrap
 
-# ============ SUPABASE: САМО-ОПРЕДЕЛЕНИЕ СТРУКТУРЫ users ============
-_ID_COLS = ["telegram_id", "user_id", "tg_id", "tgid", "chat_id"]
-
-def _guess_id_col(cols):
-    for c in _ID_COLS:
-        if c in cols:
-            return c
-    return None
+# ============ SUPABASE: работа с твоей таблицей users ============
+_ID_COLS = ["user_id", "telegram_id", "tg_id", "tgid"]
 
 def get_users_columns():
     try:
@@ -70,21 +64,33 @@ def get_users_columns():
         pass
     return []
 
-def find_user_by_tgid(tgid):
-    cols = get_users_columns()
-    for col in _ID_COLS:
-        if col in cols:
-            try:
-                r = _http.get(f"{SB_URL}/rest/v1/users?{col}=eq.{tgid}&select=*",
-                              headers=SB_HDR, timeout=6)
-                if r.status_code == 200 and r.json():
-                    return r.json()[0], col
-            except Exception:
-                pass
+def get_user_col(tgid):
+    """Ищет пользователя по user_id (твоя колонка). Возвращает (строка, имя_колонки)."""
+    try:
+        r = _http.get(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}&select=*",
+                      headers=SB_HDR, timeout=6)
+        if r.status_code == 200 and r.json():
+            return r.json()[0], "user_id"
+    except Exception:
+        pass
     return None, None
 
-def get_user_col(tgid):
-    return find_user_by_tgid(tgid)
+def parse_status(u):
+    """Читает Premium/админ/владельца из твоих полей."""
+    owner = bool(u.get("is_owner")) or str(u.get("user_id")) == OWNER_TGID
+    admin = bool(u.get("is_admin")) or bool(u.get("admin"))
+    premium = bool(u.get("premium")) or bool(u.get("is_premium"))
+    until = u.get("premium_expires") or u.get("premium_until")
+    if until:
+        try:
+            s = str(until)
+            if datetime.fromisoformat(s.replace("Z", "+00:00")) < datetime.now(timezone.utc):
+                premium = False
+        except Exception:
+            pass
+    role = "owner" if owner else ("admin" if admin else ("premium" if premium else "user"))
+    return {"premium": premium, "until": str(until or ""), "admin": admin,
+            "role": role, "owner": owner}
 
 # ============ РЕГИСТРАЦИЯ / ВХОД ============
 @app.route("/api/register", methods=["POST"])
@@ -98,21 +104,19 @@ def register():
             return jsonify({"ok": False, "error": "Заполни все поля"})
         if len(pwd) < 4:
             return jsonify({"ok": False, "error": "Пароль минимум 4 символа"})
-        u, idcol = get_user_col(tgid)
+        u, _ = get_user_col(tgid)
         if u:
             return jsonify({"ok": False, "error": "Аккаунт с таким Telegram ID уже существует"})
         cols = get_users_columns()
-        if not cols:
-            return jsonify({"ok": False, "error": "Не удалось получить таблицу users. Проверь RLS-политики."})
-        idcol = _guess_id_col(cols) or "user_id"
-        payload = {idcol: str(tgid), "username": name, "password": hash_pw(pwd),
-                   "role": "user"}
-        if "premium" in cols: payload["premium"] = False
-        if "admin" in cols: payload["admin"] = False
+        payload = {"user_id": int(tgid) if str(tgid).isdigit() else tgid,
+                   "username": name, "password": hash_pw(pwd)}
+        if "premium" in cols: payload["premium"] = 0
+        if "is_admin" in cols: payload["is_admin"] = 0
+        if "is_owner" in cols: payload["is_owner"] = 0
         r = _http.post(f"{SB_URL}/rest/v1/users", json=payload,
                        headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
         if r.status_code not in (200, 201, 204):
-            return jsonify({"ok": False, "error": f"Регистрация не удалась (статус {r.status_code}). Проверь RLS: {r.text[:150]}"})
+            return jsonify({"ok": False, "error": f"Регистрация не удалась (статус {r.status_code}): {r.text[:150]}"})
         session.permanent = True; session["uid"] = tgid; session["name"] = name
         return jsonify({"ok": True, "uid": tgid, "name": name})
     except Exception as e:
@@ -150,19 +154,9 @@ def logout():
 @login_required
 def me():
     u, _ = get_user_col(session["uid"])
-    u = u or {}
-    premium = bool(u.get("premium", False) or u.get("is_premium", False))
-    until = u.get("premium_until")
-    if isinstance(until, str):
-        try:
-            if datetime.fromisoformat(until.replace("Z", "+00:00")) < datetime.now(timezone.utc):
-                premium = False
-        except Exception: pass
-    admin = bool(u.get("admin", False) or u.get("is_admin", False))
-    role = "owner" if str(session["uid"]) == OWNER_TGID else ("admin" if admin else ("premium" if premium else "user"))
-    return jsonify({"ok": True, "uid": session["uid"], "name": session.get("name", ""),
-                    "status": {"premium": premium, "admin": admin, "role": role,
-                               "owner": str(session["uid"]) == OWNER_TGID, "until": str(until or "")}})
+    st = parse_status(u) if u else {"premium": False, "until": "", "admin": False,
+                                    "role": "user", "owner": False}
+    return jsonify({"ok": True, "uid": session["uid"], "name": session.get("name", ""), "status": st})
 
 @app.route("/api/force_owner", methods=["POST"])
 def force_owner():
@@ -171,20 +165,21 @@ def force_owner():
         return jsonify({"ok": False, "error": "Недоступно"})
     u, idcol = get_user_col(OWNER_TGID)
     if u:
-        r = _http.patch(f"{SB_URL}/rest/v1/users?{idcol}=eq.{OWNER_TGID}",
-                        json={"password": hash_pw(OWNER_PASS), "role": "owner", "username": OWNER_NAME},
-                        headers=SB_HDR, timeout=6)
+        _http.patch(f"{SB_URL}/rest/v1/users?user_id=eq.{OWNER_TGID}",
+                    json={"password": hash_pw(OWNER_PASS), "username": OWNER_NAME,
+                          "is_owner": 1, "is_admin": 1, "premium": 1},
+                    headers=SB_HDR, timeout=6)
     else:
         cols = get_users_columns()
-        idcol = _guess_id_col(cols) or "user_id"
-        r = _http.post(f"{SB_URL}/rest/v1/users",
-                       json={idcol: OWNER_TGID, "username": OWNER_NAME,
-                             "password": hash_pw(OWNER_PASS), "role": "owner",
-                             "premium": True, "admin": True},
-                       headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
+        payload = {"user_id": int(OWNER_TGID), "username": OWNER_NAME,
+                   "password": hash_pw(OWNER_PASS)}
+        if "is_owner" in cols: payload["is_owner"] = 1
+        if "is_admin" in cols: payload["is_admin"] = 1
+        if "premium" in cols: payload["premium"] = 1
+        _http.post(f"{SB_URL}/rest/v1/users", json=payload,
+                   headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
     return jsonify({"ok": True, "message": "Пароль владельца сброшен"})
 
-# ============ ДИАГНОСТИКА ============
 @app.route("/api/diag")
 def diag():
     out = {}
@@ -196,7 +191,7 @@ def diag():
         out["users_error"] = str(e)
     return jsonify(out)
 
-# ============ ЧАТ (в Supabase) ============
+# ============ ЧАТ ============
 def _insert(table, data):
     try:
         r = _http.post(f"{SB_URL}/rest/v1/{table}", json=data,
@@ -263,18 +258,16 @@ def export_chat():
     buf = io.BytesIO(text.encode("utf-8"))
     return send_file(buf, as_attachment=True, download_name="chat.txt", mimetype="text/plain")
 
-# ============ АДМИН (владелец) ============
+# ============ АДМИН ============
 @app.route("/api/admin/users")
 @owner_required
 def admin_users():
-    rows = _select("users", "select=*&order=created_at.desc&limit=1000") or []
+    rows = _select("users", "select=*&order=joined_at.desc&limit=1000") or []
     res = []
     for r in rows:
-        idcol = _guess_id_col(list(r.keys()))
-        res.append({"id": r.get(idcol) if idcol else r.get("user_id"),
-                    "name": r.get("username") or r.get("name"),
-                    "role": r.get("role", "user"),
-                    "premium": r.get("premium", False)})
+        res.append({"id": r.get("user_id"), "name": r.get("username"),
+                    "role": "owner" if r.get("is_owner") else ("admin" if r.get("is_admin") else "user"),
+                    "premium": bool(r.get("premium"))})
     return jsonify({"ok": True, "users": res})
 
 @app.route("/api/admin/reset_password", methods=["POST"])
@@ -285,10 +278,10 @@ def admin_reset_password():
     newp = str(d.get("password", "")).strip()
     if not tgid or not newp:
         return jsonify({"ok": False, "error": "Нужны ID и пароль"})
-    u, idcol = get_user_col(tgid)
+    u, _ = get_user_col(tgid)
     if not u:
         return jsonify({"ok": False, "error": "Аккаунт не найден"})
-    r = _http.patch(f"{SB_URL}/rest/v1/users?{idcol}=eq.{tgid}",
+    r = _http.patch(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}",
                     json={"password": hash_pw(newp)}, headers=SB_HDR, timeout=6)
     return jsonify({"ok": r.status_code in (200, 204)})
 
@@ -299,10 +292,7 @@ def admin_delete_user():
     tgid = str(d.get("telegram_id", "")).strip()
     if not tgid or tgid == OWNER_TGID:
         return jsonify({"ok": False, "error": "Нельзя удалить"})
-    u, idcol = get_user_col(tgid)
-    if not u:
-        return jsonify({"ok": False, "error": "Аккаунт не найден"})
-    r = _http.delete(f"{SB_URL}/rest/v1/users?{idcol}=eq.{tgid}", headers=SB_HDR, timeout=6)
+    r = _http.delete(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}", headers=SB_HDR, timeout=6)
     return jsonify({"ok": r.status_code in (200, 204)})
 
 @app.route("/api/admin/give_premium", methods=["POST"])
@@ -312,14 +302,14 @@ def admin_give_premium():
     tgid = str(d.get("telegram_id", "")).strip()
     if not tgid:
         return jsonify({"ok": False, "error": "Нужен Telegram-ID"})
-    u, idcol = get_user_col(tgid)
+    u, _ = get_user_col(tgid)
     if not u:
         return jsonify({"ok": False, "error": "Аккаунт не найден"})
     until = datetime.now(timezone.utc) + timedelta(days=int(d.get("days", 0)),
                                                    hours=int(d.get("hours", 0)),
                                                    minutes=int(d.get("minutes", 0)))
-    r = _http.patch(f"{SB_URL}/rest/v1/users?{idcol}=eq.{tgid}",
-                    json={"premium": True, "premium_until": until.isoformat()},
+    r = _http.patch(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}",
+                    json={"premium": 1, "premium_expires": until.isoformat()},
                     headers=SB_HDR, timeout=6)
     return jsonify({"ok": r.status_code in (200, 204)})
 
@@ -330,11 +320,11 @@ def admin_remove_premium():
     tgid = str(d.get("telegram_id", "")).strip()
     if not tgid:
         return jsonify({"ok": False, "error": "Нужен Telegram-ID"})
-    u, idcol = get_user_col(tgid)
+    u, _ = get_user_col(tgid)
     if not u:
         return jsonify({"ok": False, "error": "Аккаунт не найден"})
-    r = _http.patch(f"{SB_URL}/rest/v1/users?{idcol}=eq.{tgid}",
-                    json={"premium": False, "premium_until": None}, headers=SB_HDR, timeout=6)
+    r = _http.patch(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}",
+                    json={"premium": 0, "premium_expires": None}, headers=SB_HDR, timeout=6)
     return jsonify({"ok": r.status_code in (200, 204)})
 
 @app.route("/api/admin/set_admin", methods=["POST"])
@@ -344,11 +334,11 @@ def admin_set_admin():
     tgid = str(d.get("telegram_id", "")).strip()
     if not tgid:
         return jsonify({"ok": False, "error": "Нужен Telegram-ID"})
-    u, idcol = get_user_col(tgid)
+    u, _ = get_user_col(tgid)
     if not u:
         return jsonify({"ok": False, "error": "Аккаунт не найден"})
-    r = _http.patch(f"{SB_URL}/rest/v1/users?{idcol}=eq.{tgid}",
-                    json={"admin": bool(d.get("admin"))}, headers=SB_HDR, timeout=6)
+    r = _http.patch(f"{SB_URL}/rest/v1/users?user_id=eq.{tgid}",
+                    json={"is_admin": 1 if d.get("admin") else 0}, headers=SB_HDR, timeout=6)
     return jsonify({"ok": r.status_code in (200, 204)})
 
 @app.route("/api/admin/broadcast", methods=["POST"])
@@ -358,11 +348,10 @@ def admin_broadcast():
     text = str(d.get("text", "")).strip()
     if not text:
         return jsonify({"ok": False, "error": "Пустой текст"})
-    rows = _select("users", "select=*") or []
+    rows = _select("users", "select=user_id") or []
     sent = 0
-    idcol = _guess_id_col(list(rows[0].keys())) if rows else "user_id"
     for u in rows:
-        tid = u.get(idcol) or u.get("telegram_id")
+        tid = u.get("user_id")
         if not tid: continue
         try:
             _http.post(f"{BOT}/sendMessage", json={"chat_id": tid, "text": text}, timeout=5)
@@ -381,7 +370,6 @@ def quick_answers(text):
     if "кто ты" in t or "ты кто" in t: return "Я AWESOME AI — умный помощник ✨"
     if "спасибо" in t or "благодар" in t: return "Всегда пожалуйста! 😊"
     if "пока" in t or "до свидания" in t: return "Пока! Возвращайся 👋"
-    if "праздник" in t or "какой сегодня день" in t: return "Проверь календарь праздников на сегодня 📅"
     if re.search(r"[0-9]+\s*[+\-*/]\s*[0-9]+", t):
         try:
             res = eval(re.search(r"[0-9+\-*/().\s]+", t).group().strip())
@@ -500,16 +488,16 @@ function reset(){const b=document.getElementById('authBtn');b.textContent=isReg?
 </script></body></html>"""
 
 if __name__ == "__main__":
-    # создаём владельца при старте, если таблица и RLS позволяют
+    # создаём владельца при старте под твою таблицу
     try:
-        u, idcol = get_user_col(OWNER_TGID)
+        u, _ = get_user_col(OWNER_TGID)
         if not u:
             cols = get_users_columns()
-            idcol = _guess_id_col(cols) or "user_id"
-            payload = {idcol: OWNER_TGID, "username": OWNER_NAME,
-                       "password": hash_pw(OWNER_PASS), "role": "owner"}
-            if "premium" in cols: payload["premium"] = True
-            if "admin" in cols: payload["admin"] = True
+            payload = {"user_id": int(OWNER_TGID), "username": OWNER_NAME,
+                       "password": hash_pw(OWNER_PASS)}
+            if "premium" in cols: payload["premium"] = 1
+            if "is_admin" in cols: payload["is_admin"] = 1
+            if "is_owner" in cols: payload["is_owner"] = 1
             _http.post(f"{SB_URL}/rest/v1/users", json=payload,
                        headers={**SB_HDR, "Prefer": "return=minimal"}, timeout=6)
     except Exception:
