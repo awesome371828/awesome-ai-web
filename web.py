@@ -932,6 +932,36 @@ async function doLogin(){
 function resetBtn(){const b=document.querySelector('.btn');b.textContent='Войти';b.disabled=false;}
 </script></body></html>"""
 
+@app.route("/api/diag")
+def diag():
+    """Показывает реальную ошибку входа, чтобы найти причину. Открывать в браузере."""
+    out = {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        out["db"] = "OK — подключение к БД работает"
+        cur.close(); conn.close()
+        # проверим таблицу users
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='users'")
+        cols = [r[0] for r in cur.fetchall()]
+        out["users_columns"] = cols
+        cur.close(); conn.close()
+    except Exception as e:
+        out["db_error"] = str(e)
+    # Supabase
+    try:
+        r = _http.get(f"{SUPABASE_URL}/rest/v1/users?select=count", headers=SB_HDR, timeout=5)
+        out["supabase"] = f"status {r.status_code}"
+    except Exception as e:
+        out["supabase_error"] = str(e)
+    return jsonify(out)
+
+
 # ============================================================
 #  ЗАПУСК
 # ============================================================
