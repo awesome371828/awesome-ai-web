@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AWESOME AI WEB — PRO: оптимизация, анимации (transform/opacity), бургер-меню, память, поиск"""
-import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid
+"""AWESOME AI WEB — PRO ULTRA: Telegram-вход, память, поиск, 40+ функций"""
+import os, re, io, time, json, base64, urllib.parse, hashlib, random, html, uuid as _uuid, hmac
 from datetime import datetime, timedelta, timezone
 import requests, urllib3
 import psycopg2, psycopg2.extras
@@ -108,6 +108,40 @@ def init_db():
     cur.close(); conn.close()
 init_db()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if HAS_SUPABASE else None
+
+# ===== ВХОД ЧЕРЕЗ TELEGRAM =====
+def tg_verify(data):
+    """Проверка подписи виджета Telegram Login."""
+    try:
+        secret=hashlib.sha256(TELEGRAM_TOKEN.encode()).digest()
+        check=data.get('hash','')
+        items=sorted((k,v) for k,v in data.items() if k!='hash')
+        msg="\n".join(f"{k}={v}" for k,v in items)
+        calc=hmac.new(secret,msg.encode(),hashlib.sha256).hexdigest()
+        return hmac.compare_digest(calc,check) and int(data.get('auth_date',0))>time.time()-86400
+    except Exception:
+        return False
+
+@app.route('/tg_oauth')
+def tg_oauth():
+    d=request.args.to_dict()
+    if not tg_verify(d):
+        return "<html><body style='background:#0a0f1c;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'>❌ Ошибка входа. Попробуй ещё раз.</body></html>"
+    tg=str(d.get('id','')).strip()
+    first=d.get('first_name','') or ''
+    last=d.get('last_name','') or ''
+    name=(first+' '+last).strip() or 'Telegram'
+    u=get_user(tg)
+    if not u:
+        pw='tg_'+''.join(random.choice('abcdef0123456789') for _ in range(8))
+        ok,_=reg_user(tg,name,pw)
+        if not ok and not get_user(tg):
+            return "<html><body style='background:#0a0f1c;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh'>Не удалось создать аккаунт</body></html>"
+    session.permanent=True; session['user_id']=tg; session['name']=name
+    return """<html><head><script>
+    if(window.opener){window.opener.postMessage('tg_ok','*');window.close();}
+    else{location.href='/';}
+    </script></head><body style='background:#0a0f1c;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh'>✅ Вход выполнен!</body></html>"""
 
 # ===== ПАМЯТЬ О ПОЛЬЗОВАТЕЛЕ =====
 def get_memory(uid, limit=30):
@@ -425,23 +459,59 @@ def smart_answer(uid,text,history,img=None,tg=None,doc=None):
     if a and len(a)>4: return a
     b=ygpt(text,sp)
     if b and len(b)>4: return b
+    # ---- МНОЖЕСТВО ПОЛЕЗНЫХ ФУНКЦИЙ (фолбэки) ----
     if img: return f"📸 {img}"
     if any(w in tl for w in ["привет","здравств","хай","ку"]): return "👋 Привет! Рад тебя видеть. Чем займёмся сегодня?"
+    if "время" in tl and ("сейчас" in tl or "сколько" in tl or "московск" in tl or "час" in tl):
+        return f"🕒 Сейчас **{gm().strftime('%H:%M:%S')}** (Москва), дата: **{gdate()}**."
+    if "дата" in tl or "какое сегодня число" in tl:
+        return f"📅 Сегодня **{gdate()}**, {['понедельник','вторник','среда','четверг','пятница','суббота','воскресенье'][gm().weekday()]}."
+    if "переведи" in tl or "перевод" in tl:
+        target='ru'
+        if "англ" in tl: target='en'
+        elif "немец" in tl: target='de'
+        elif "франц" in tl: target='fr'
+        txt=re.sub(r'(переведи|на английский|на русский|на немецкий|на французский|пожалуйста|на .*?)','',tl,flags=re.I).strip()
+        return "🌍 "+translate(txt[:500],target) if txt else "Напиши что перевести."
+    if "анекдот" in tl or "шутк" in tl or "рассмеши" in tl:
+        jokes=["— Почему программист перепутал Хэллоуин и Рождество? — Потому что Oct 31 == Dec 25 😄","— Админ заходит в бар, а там все буферы переполнены 😅","— Что сказал один сервер другому? — Ты сегодня в сети? 📶"]
+        return "😂 "+random.choice(jokes)
+    if "комплимент" in tl or "похвали" in tl or "что во мне хорош" in tl:
+        return "✨ Ты потрясающий! У тебя отличный вкус (ты же выбрал AWESOME AI 😉), ты любопытный и явно умный собеседник. Таких людей приятно встречать!"
+    if "план" in tl or "распиши" in tl and "по шагам" in tl:
+        return "📋 **Пошаговый план** (я подготовлю его после того, как дашь больше деталей).\n\n1. Сформулируй цель 🎯\n2. Разбей на задачи 🔨\n3. Выдели сроки ⏰\n4. Действуй! 🚀\n\nНапиши тему — и я сделаю подробный план по ней."
+    if "режим" in tl or "стань" in tl or "ты теперь" in tl:
+        return "⚡ **Доступные режимы** — просто скажи:\n• «Будь моим юристом» ⚖️\n• «Будь моим психологом» 🧠\n• «Будь моим учителем» 📚\n• «Будь моим кодером» 💻\n• «Будь моим маркетологом» 📈\n• «Расскажи сказку» 🧚\n\nВыбери роль — и я отвечу в ней!"
+    if any(k in tl for k in ['биткоин','btc','крипта','эфир']):
+        c=crypto(); return c if c else "🪙 Не удалось получить цену."
+    if any(k in tl for k in ['курс','доллар','евро','валют']):
+        c=currency(); return c if c else "💵 Не удалось получить курс."
+    if "рецепт" in tl or "приготов" in tl:
+        return "🍳 Подскажи что хочешь приготовить (например: «рецепт омлета»), и я дам подробный рецепт с ингредиентами и шагами!"
+    if "фильм" in tl and ("посоветуй" in tl or "подбери" in tl or "рекоменд" in tl):
+        return "🎬 Отличный выбор! Напиши жанр (фантастика, комедия, драма, детектив, ужасы), и я подберу топ фильмов под настроение."
+    if "книг" in tl and ("посоветуй" in tl or "подбери" in tl or "рекоменд" in tl):
+        return "📚 Напиши любимый жанр — и я посоветую книги, которые точно тебе зайдут!"
+    if "выучи" in tl or "запомни" in tl:
+        fact=re.sub(r'(запомни|выучи|что)\s*','',tl).strip()[:500]
+        if len(fact)>3:
+            remember(uid, fact)
+            return "🧠 Запомнил: «"+fact+"». Расскажу при случае!"
+        return "🧠 Что именно запомнить?"
+    if "что ты помнишь" in tl or "память" in tl:
+        mem=get_memory(uid)
+        return "🧠 **Что я помню о тебе:**\n"+("\n".join("• "+f for f in mem) if mem else "Пока ничего. Скажи «запомни...», и я сохраню!")
+    if "кто ты" in tl or "что ты умеешь" in tl:
+        return "Я **AWESOME AI** — самый мощный живой помощник ✨\n\nУмею:\n**1. Общаться** 🗣\n**2. Искать в интернете** 🌐\n**3. Помнить о тебе** 🧠\n**4. Отвечать на свежие новости** 📰\n**5. Считать** 🧮\n**6. Рисовать** 🎨\n**7. Погода/валюты/крипта** 🌤💵🪙\n**8. Переводить** 🌍\n**9. Шутить** 😂\n**10. Давать планы** 📋\n\nЧто попробуем?"
+    if re.search(r'\d+\s*[\+\-\*\/]\s*\d+',tl):
+        try:
+            res=eval(re.sub(r'[^0-9+\-*/(). ]','',tl)); return f"🧮 Результат: **{res}**"
+        except: return "🧮 Не понял выражение. Например: 2+2*3"
     if "погода" in tl:
         m=re.search(r'(в|в городе)\s+([а-яА-Яa-zA-Z\- ]+)',tl)
         if m:
             w=weather(m.group(2).strip()); return w if w else "🌤 Напиши: погода в [город]"
         return "🌤 Напиши: погода в [город]"
-    if any(k in tl for k in ['курс','доллар','евро']):
-        c=currency(); return c if c else "💵 Не удалось получить курс."
-    if any(k in tl for k in ['биткоин','btc','крипта','эфир']):
-        c=crypto(); return c if c else "🪙 Не удалось получить цену."
-    if re.search(r'\d+\s*[\+\-\*\/]\s*\d+',tl):
-        try:
-            res=eval(re.sub(r'[^0-9+\-*/(). ]','',tl)); return f"🧮 Результат: **{res}**"
-        except: return "🧮 Не понял выражение. Например: 2+2*3"
-    if "кто ты" in tl or "что ты умеешь" in tl:
-        return "Я **AWESOME AI** — самый мощный живой помощник ✨\n\nУмею:\n**1. Общаться** 🗣\n**2. Искать в интернете** 🌐\n**3. Помнить о тебе** 🧠\n**4. Отвечать на свежие новости** 📰\n**5. Считать** 🧮\n**6. Рисовать** 🎨\n**7. Погода/валюты/крипта** 🌤💵🪙\n**8. Переводить** 🌍\n\nЧто попробуем?"
     return "🤖 Обрабатываю... Напиши чуть подробнее, и я дам полный ответ!"
 
 def describe_img(b64):
@@ -825,7 +895,7 @@ def admin_reset_db():
     log_admin(uid,"Полная очистка аккаунтов")
     return jsonify({'ok':True})
 
-# ===== HTML: PRO-интерфейс (оптимизированный, transform/opacity, бургер-меню) =====
+# ===== HTML: PRO-интерфейс =====
 INDEX_HTML = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>AWESOME AI — PRO</title>
 <style>
 :root{--bg:#0a0f1c;--bg2:#101827;--panel:#131c2e;--border:#223052;--accent:#6ea8ff;--accent2:#55e6c1;--text:#e9eefc;--muted:#93a0bd;--danger:#ff7b8a;--success:#5fd0a0;--glow:rgba(110,168,255,.20)}
@@ -833,8 +903,7 @@ INDEX_HTML = r"""<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><met
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Segoe UI',system-ui,sans-serif}
 html,body{height:100%}
 body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;transition:background .25s;position:relative;-webkit-font-smoothing:antialiased}
-.bg-anim{position:fixed;inset:0;z-index:0;pointer-events:none;contain:strict;
-  background:radial-gradient(circle at 25% 25%,rgba(110,168,255,.12),transparent 42%),radial-gradient(circle at 75% 75%,rgba(85,230,193,.12),transparent 42%),radial-gradient(circle at 50% 100%,rgba(124,77,255,.10),transparent 45%)}
+.bg-anim{position:fixed;inset:0;z-index:0;pointer-events:none;contain:strict;background:radial-gradient(circle at 25% 25%,rgba(110,168,255,.12),transparent 42%),radial-gradient(circle at 75% 75%,rgba(85,230,193,.12),transparent 42%),radial-gradient(circle at 50% 100%,rgba(124,77,255,.10),transparent 45%)}
 .particles{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden}
 .part{position:absolute;bottom:-10px;border-radius:50%;opacity:0;will-change:transform;animation:floatUp linear infinite}
 @keyframes floatUp{0%{transform:translateY(0) scale(.6);opacity:0}15%{opacity:.12}85%{opacity:.06}100%{transform:translateY(-108vh) scale(1.15);opacity:0}}
@@ -1024,6 +1093,8 @@ textarea{flex:1;background:none;border:none;outline:none;color:var(--text);font-
 <input type="text" id="regId" placeholder="Telegram-ID (обязательно)" inputmode="numeric">
 <input type="password" id="regPass" placeholder="Пароль (обязательно)">
 <button class="btn" id="authBtn" onclick="submitAuth()">Войти</button>
+<button class="btn ghost" onclick="tgLogin()" style="margin-top:4px">🔐 Войти через Telegram</button>
+<div style="text-align:center;margin:6px 0" id="tgWidget"></div>
 <div class="hint">Твой Premium/статус из ТГ-бота применяется автоматически по Telegram-ID. Пароль сохраняется навсегда.</div>
 </div></div>
 
@@ -1066,6 +1137,8 @@ async function api(url,method,body){try{const o={method:method||'GET',headers:{'
 function setTheme(t){currentTheme=t;document.body.setAttribute('data-theme',t);try{localStorage.setItem('awesome_theme',t);}catch(e){}}
 function toggleTheme(){setTheme(currentTheme==='dark'?'light':'dark');api('/api/settings','POST',{theme:currentTheme});}
 function switchTab(m){authMode=m;document.getElementById('tabLogin').className='tab'+(m==='login'?' active':'');document.getElementById('tabReg').className='tab'+(m==='reg'?' active':'');document.getElementById('regFields').style.display=m==='reg'?'block':'none';document.getElementById('authTitle').textContent=m==='reg'?'Регистрация':'Вход';document.getElementById('authBtn').textContent=m==='reg'?'Создать аккаунт':'Войти';}
+function tgLogin(){const c=document.getElementById('tgWidget');c.innerHTML='<p style="color:var(--muted);font-size:12px">Загрузка кнопки Telegram...</p>';const s=document.createElement('script');s.async=true;s.src='https://telegram.org/js/telegram-widget.js?22';s.setAttribute('data-telegram-login','awesomeneiro_bot');s.setAttribute('data-size','large');s.setAttribute('data-radius','10');s.setAttribute('data-auth-url',location.origin+'/tg_oauth');s.setAttribute('data-request-access','write');s.onerror=()=>{c.innerHTML='<p style="color:var(--danger);font-size:12px">Не удалось загрузить. Проверь домен в BotFather (/setdomain)</p>';};c.appendChild(s);}
+window.addEventListener('message',e=>{if(e.data==='tg_ok'){toast('Вход выполнен!','success');init();}});
 async function submitAuth(){const id=document.getElementById('regId').value.trim(),pw=document.getElementById('regPass').value;if(!id||!pw){toast('Заполни Telegram-ID и пароль','error');return;}let body={telegram_id:id,password:pw};if(authMode==='reg'){const name=document.getElementById('regName').value.trim();if(!name){toast('Имя обязательно','error');return;}body.name=name;}const r=await api(authMode==='reg'?'/api/register':'/api/login','POST',body);if(r.ok){currentUserId=r.user_id;closeOverlay('authOverlay');toast('Добро пожаловать!','success');init();}else toast(r.error||'Ошибка','error');}
 async function logout(){await api('/api/logout','POST');location.reload();}
 function openOverlay(id){document.getElementById(id).classList.add('show');}
@@ -1141,6 +1214,6 @@ document.addEventListener('DOMContentLoaded',init);
 </script></body></html>"""
 
 if __name__ == '__main__':
-    print("🧠 AWESOME AI WEB — PRO: оптимизация, анимации, память, поиск, бургер-меню")
+    print("🧠 AWESOME AI WEB — PRO ULTRA: Telegram-вход, память, поиск, 40+ функций")
     port=int(os.getenv("PORT",5000))
     app.run(host='0.0.0.0',port=port,debug=False,threaded=True)
